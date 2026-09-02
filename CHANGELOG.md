@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 — 2026-09-02
+
+- Treat customer- and third-party-controlled values returned through MCP as
+  untrusted data rather than agent instructions, with explicit boundaries for
+  commands, links, scope changes, approvals, and disclosure.
+- Document the active official MCP Registry entry, skills.sh installation, and
+  Codex and Claude Code repository marketplaces.
+
 ## 0.1.1 — 2026-09-02
 
 - Exclude Git implementation metadata from the committed-tree secret scan so

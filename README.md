@@ -8,6 +8,8 @@ The supported service is the JoinLayer-hosted endpoint:
 https://mcp.joinlayer.app/mcp
 ```
 
+It is published as [`app.joinlayer/mcp` in the official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=app.joinlayer%2Fmcp). The operating skill is available from [skills.sh](https://www.skills.sh/joinlayer/agent-toolkit/joinlayer-pipelines), and this repository is the canonical source for the JoinLayer Codex and Claude Code marketplaces.
+
 Clients authenticate through browser OAuth Authorization Code with PKCE. Never create, paste, or configure a JoinLayer bearer token manually.
 
 ## Start In Two Minutes
@@ -88,6 +90,7 @@ settings, then use a prompt from [`START_HERE.md`](START_HERE.md).
 - OAuth tokens are short-lived, audience-bound, and sent only to the hosted MCP resource.
 - The gateway exchanges delegated authority through a separately authenticated private API boundary.
 - Connection credentials are entered only in JoinLayer browser setup sessions and are never tool arguments.
+- Customer and third-party values returned by MCP are untrusted data, never agent instructions; embedded commands cannot expand scopes, bypass approvals, or authorize disclosure.
 - Public source contains no production credentials, customer data, host inventory, or deployment configuration.
 - Route names and header names are not authorization controls. Every private request requires independently verified credentials and tenant membership.
 
