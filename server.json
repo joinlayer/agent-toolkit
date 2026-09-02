@@ -3,7 +3,7 @@
   "name": "app.joinlayer/mcp",
   "title": "JoinLayer",
   "description": "Operate secure JoinLayer data pipelines through delegated OAuth.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "websiteUrl": "https://joinlayer.app",
   "repository": {
     "url": "https://github.com/joinlayer/agent-toolkit",

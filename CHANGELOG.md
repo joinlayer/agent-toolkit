@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 — 2026-09-02
+
+- Exclude Git implementation metadata from the committed-tree secret scan so
+  checkout commit IDs cannot be misclassified as leaked high-entropy values.
+
 ## 0.1.0 — 2026-09-02
 
 - Add the `joinlayer-pipelines` operating skill for Codex, Claude Code, and
