@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "joinlayer",
+  "owner": {
+    "name": "JoinLayer",
+    "email": "hello@joinlayer.app"
+  },
+  "metadata": {
+    "description": "Official JoinLayer plugins for agents"
+  },
+  "plugins": [
+    {
+      "name": "joinlayer",
+      "source": {
+        "source": "github",
+        "repo": "joinlayer/agent-toolkit"
+      },
+      "description": "Build and operate secure JoinLayer data pipelines through hosted MCP and browser OAuth"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "name": "joinlayer",
+  "version": "0.1.0",
+  "description": "Build and operate secure JoinLayer data pipelines through hosted MCP and browser OAuth.",
+  "author": {
+    "name": "JoinLayer",
+    "email": "hello@joinlayer.app",
+    "url": "https://joinlayer.app"
+  },
+  "homepage": "https://docs.joinlayer.app/agent-integrations",
+  "repository": "https://github.com/joinlayer/agent-toolkit",
+  "license": "Apache-2.0",
+  "keywords": ["joinlayer", "mcp", "data-pipelines", "etl", "cdc"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

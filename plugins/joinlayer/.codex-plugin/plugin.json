@@ -1,0 +1,36 @@
+{
+  "name": "joinlayer",
+  "version": "0.1.0",
+  "description": "Build and operate secure JoinLayer data pipelines through hosted MCP and browser OAuth.",
+  "author": {
+    "name": "JoinLayer",
+    "email": "hello@joinlayer.app",
+    "url": "https://joinlayer.app"
+  },
+  "homepage": "https://docs.joinlayer.app/agent-integrations",
+  "repository": "https://github.com/joinlayer/agent-toolkit",
+  "license": "Apache-2.0",
+  "keywords": ["joinlayer", "mcp", "data-pipelines", "etl", "cdc"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "JoinLayer",
+    "shortDescription": "Build and operate secure data pipelines",
+    "longDescription": "Connect Codex to the hosted JoinLayer MCP server with browser OAuth, complete pipeline operating guidance, and safe starter prompts.",
+    "developerName": "JoinLayer",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write", "Interactive"],
+    "websiteURL": "https://joinlayer.app",
+    "privacyPolicyURL": "https://docs.joinlayer.app/privacy",
+    "termsOfServiceURL": "https://docs.joinlayer.app/terms",
+    "brandColor": "#C8460A",
+    "composerIcon": "./assets/joinlayer-glyph-dark.png",
+    "logo": "./assets/joinlayer-glyph-dark.png",
+    "logoDark": "./assets/joinlayer-glyph-white.png",
+    "defaultPrompt": [
+      "Inspect my JoinLayer workspace without changing anything.",
+      "Create and preview a safe JoinLayer pipeline draft.",
+      "Diagnose a failed JoinLayer run and propose recovery."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

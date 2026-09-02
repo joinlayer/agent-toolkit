@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "joinlayer": {
+      "type": "http",
+      "url": "https://mcp.joinlayer.app/mcp"
+    }
+  }
+}

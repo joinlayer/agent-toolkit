@@ -1,0 +1,11 @@
+interface:
+  display_name: "JoinLayer Pipelines"
+  short_description: "Build and operate safe enriched data pipelines"
+  default_prompt: "Use $joinlayer-pipelines. First inspect the authenticated workspace, scopes, capacity, connections, and pipelines through the JoinLayer MCP tools. Do not change anything until the requested outcome and current state are clear."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "joinlayer"
+      description: "JoinLayer workspace pipeline API"
+      transport: "streamable_http"
+      url: "https://mcp.joinlayer.app/mcp"
