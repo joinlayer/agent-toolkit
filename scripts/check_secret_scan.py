@@ -22,7 +22,16 @@ REVIEWED_SYNTHETIC_FINDINGS = {
 
 def main() -> None:
     completed = subprocess.run(
-        [sys.executable, "-m", "detect_secrets", "scan", "--all-files", "."],
+        [
+            sys.executable,
+            "-m",
+            "detect_secrets",
+            "scan",
+            "--all-files",
+            "--exclude-files",
+            r"(^|/)\.git(/|$)",
+            ".",
+        ],
         check=False,
         capture_output=True,
         text=True,
