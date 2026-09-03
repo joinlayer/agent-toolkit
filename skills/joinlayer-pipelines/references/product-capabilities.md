@@ -185,7 +185,7 @@ The draft input uses the same canonical values returned by `get_pipeline`: `targ
 
 ## Authorization And Errors
 
-- `insufficient_scope` means authentication succeeded. Read `required_scopes` and `granted_scopes`, explain why the extra action is needed, and use incremental OAuth consent. Never request a token.
+- `insufficient_scope` means authentication succeeded. Read the exact scope from the authorization challenge (and compare `required_scopes` with `granted_scopes` when the client exposes those fields), explain why the extra action is needed, and use incremental OAuth consent. Never request a token.
 - `approval_required` means request an exact approval and wait for the user in JoinLayer.
 - An invalid/expired/mismatched approval requires a new request for the current exact operation; never modify and reuse it.
 - A capacity blocker is authoritative. Report its dimension/remediation and stop retrying.

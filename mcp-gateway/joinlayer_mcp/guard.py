@@ -4,16 +4,25 @@ import asyncio
 import json
 import math
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
+
+from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
+from mcp.types import CallToolResult, TextContent
+from pydantic import BaseModel
 
 from .api import JoinLayerAPIError
 from .auth import (
     OAuthTokenVerifier,
+    current_oauth_scopes,
     reset_current_api_token,
     reset_current_oauth_principal,
+    reset_current_oauth_scopes,
     set_current_api_token,
     set_current_oauth_principal,
+    set_current_oauth_scopes,
 )
 from .metrics import (
     AUTH_DURATION,
@@ -57,6 +66,77 @@ TOOL_SCOPES = {
     "diagnose_run_failure": "diagnostics:read",
     "get_usage_report": "usage:read",
 }
+
+SUPPORTED_SCOPES = tuple(dict.fromkeys(TOOL_SCOPES.values()))
+
+
+class MCPToolAuthorizationMiddleware:
+    """Publish per-tool OAuth metadata and enforce incremental authorization.
+
+    ChatGPT requires an MCP tool error carrying ``mcp/www_authenticate`` to
+    launch incremental OAuth. Missing or invalid bearer tokens still use the
+    transport-level challenge; an authenticated but under-scoped tool call is
+    rejected here so it never reaches a JoinLayer API tool handler.
+    """
+
+    def __init__(self, resource_metadata_url: str) -> None:
+        self.resource_metadata_url = resource_metadata_url
+
+    async def __call__(self, ctx: ServerRequestContext[Any, Any], call_next: CallNext) -> HandlerResult:
+        if ctx.method == "tools/list":
+            return _add_tool_security_schemes(await call_next(ctx))
+        if ctx.method != "tools/call":
+            return await call_next(ctx)
+
+        name = ctx.params.get("name") if isinstance(ctx.params, Mapping) else None
+        required_scope = TOOL_SCOPES.get(name) if isinstance(name, str) else None
+        if required_scope is None or required_scope in current_oauth_scopes():
+            return await call_next(ctx)
+
+        message = f"Additional authorization is required for scope {required_scope}"
+        challenge = _oauth_challenge(
+            self.resource_metadata_url,
+            required_scope,
+            "insufficient_scope",
+            message,
+        )
+        REJECTIONS.labels("insufficient_scope", "mcp").inc()
+        return CallToolResult(
+            content=[TextContent(type="text", text=message)],
+            _meta={"mcp/www_authenticate": [challenge]},
+            isError=True,
+        )
+
+
+def _add_tool_security_schemes(result: HandlerResult) -> HandlerResult:
+    if isinstance(result, BaseModel):
+        payload = result.model_dump(by_alias=True, exclude_none=True)
+    elif isinstance(result, dict):
+        payload = dict(result)
+    else:
+        return result
+
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return payload
+    enriched: list[Any] = []
+    for item in tools:
+        if not isinstance(item, dict):
+            enriched.append(item)
+            continue
+        tool = dict(item)
+        name = tool.get("name")
+        required_scope = TOOL_SCOPES.get(name) if isinstance(name, str) else None
+        if required_scope is not None:
+            schemes = [{"type": "oauth2", "scopes": [required_scope]}]
+            tool["securitySchemes"] = schemes
+            current_meta = tool.get("_meta")
+            meta = dict(current_meta) if isinstance(current_meta, dict) else {}
+            meta["securitySchemes"] = schemes
+            tool["_meta"] = meta
+        enriched.append(tool)
+    payload["tools"] = enriched
+    return payload
 
 
 @dataclass
@@ -182,6 +262,7 @@ class GatewayGuard:
             IN_FLIGHT.set(self._active)
         context_token = None
         principal_context_token = None
+        scopes_context_token = None
         try:
             if path == "/mcp":
                 source_key = "ip:" + _client_ip(scope, headers, self.trust_proxy_headers)
@@ -237,6 +318,7 @@ class GatewayGuard:
                     return
                 context_token = set_current_api_token(verification.api_token)
                 principal_context_token = set_current_oauth_principal(verification.principal_key)
+                scopes_context_token = set_current_oauth_scopes(frozenset(access.scopes))
             elif path.startswith("/skills/"):
                 key = "ip:" + _client_ip(scope, headers, self.trust_proxy_headers)
                 allowed, retry_after = await self.anonymous_buckets.allow(key)
@@ -264,7 +346,11 @@ class GatewayGuard:
                 bounded_receive = _body_receiver(body)
                 if path == "/mcp" and access is not None:
                     required_scope = _required_tool_scope(body)
-                    if required_scope and required_scope not in access.scopes:
+                    if (
+                        required_scope
+                        and required_scope not in access.scopes
+                        and not _uses_openai_tool_level_authorization(access.client_id)
+                    ):
                         granted_scopes = sorted(set(access.scopes))
                         message = f"Additional authorization is required for scope {required_scope}"
                         challenge = _oauth_challenge(
@@ -289,6 +375,8 @@ class GatewayGuard:
                         return
             await self._observe(scope, bounded_receive, send, method, route)
         finally:
+            if scopes_context_token is not None:
+                reset_current_oauth_scopes(scopes_context_token)
             if principal_context_token is not None:
                 reset_current_oauth_principal(principal_context_token)
             if context_token is not None:
@@ -367,6 +455,22 @@ def _required_tool_scope(body: bytes) -> str | None:
         return None
     name = params.get("name")
     return TOOL_SCOPES.get(name) if isinstance(name, str) else None
+
+
+def _uses_openai_tool_level_authorization(client_id: str) -> bool:
+    """Recognize validated OpenAI CIMD clients without trusting request headers."""
+    try:
+        parsed = urlsplit(client_id)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == "chatgpt.com"
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
+    )
 
 
 def _challenge_scope(headers: dict[str, str], default: str) -> str:

@@ -21,7 +21,7 @@ from starlette.responses import JSONResponse, Response
 from .api import JoinLayerAPI, JoinLayerAPIError
 from .auth import current_api_token, current_oauth_principal
 from .config import Settings
-from .guard import TOOL_SCOPES
+from .guard import MCPToolAuthorizationMiddleware, SUPPORTED_SCOPES, TOOL_SCOPES
 from .metrics import MCPToolMetricsMiddleware
 from .models import (
     ActivityQuery,
@@ -102,7 +102,10 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
             audience=settings.public_url + "/mcp",
             bind_principal=lambda _: current_oauth_principal(),
         ),
-        middleware=[MCPToolMetricsMiddleware(frozenset(TOOL_SCOPES))],
+        middleware=[
+            MCPToolMetricsMiddleware(frozenset(TOOL_SCOPES)),
+            MCPToolAuthorizationMiddleware(settings.public_url + "/.well-known/oauth-protected-resource/mcp"),
+        ],
     )
 
     @mcp.custom_route("/healthz", methods=["GET"])
@@ -127,10 +130,7 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
                 "resource": settings.public_url + "/mcp",
                 "authorization_servers": [settings.oauth_issuer],
                 "bearer_methods_supported": ["header"],
-                # MCP defines this as the minimal basic-functionality set;
-                # operation-specific permissions are requested by step-up
-                # challenges and the AS metadata still advertises all scopes.
-                "scopes_supported": ["workspace:read"],
+                "scopes_supported": list(SUPPORTED_SCOPES),
                 "resource_documentation": settings.docs_url,
             },
             headers={"Cache-Control": "public, max-age=300", "X-Content-Type-Options": "nosniff"},

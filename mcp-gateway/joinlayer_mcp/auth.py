@@ -10,6 +10,7 @@ from .api import JoinLayerAPI, JoinLayerAPIError
 
 _CURRENT_API_TOKEN: ContextVar[str | None] = ContextVar("joinlayer_mcp_api_token", default=None)
 _CURRENT_OAUTH_PRINCIPAL: ContextVar[str | None] = ContextVar("joinlayer_mcp_oauth_principal", default=None)
+_CURRENT_OAUTH_SCOPES: ContextVar[frozenset[str]] = ContextVar("joinlayer_mcp_oauth_scopes", default=frozenset())
 
 
 def current_api_token() -> str:
@@ -37,6 +38,18 @@ def set_current_oauth_principal(principal: str) -> Token[str | None]:
 
 def reset_current_oauth_principal(context_token: Token[str | None]) -> None:
     _CURRENT_OAUTH_PRINCIPAL.reset(context_token)
+
+
+def current_oauth_scopes() -> frozenset[str]:
+    return _CURRENT_OAUTH_SCOPES.get()
+
+
+def set_current_oauth_scopes(scopes: frozenset[str]) -> Token[frozenset[str]]:
+    return _CURRENT_OAUTH_SCOPES.set(scopes)
+
+
+def reset_current_oauth_scopes(context_token: Token[frozenset[str]]) -> None:
+    _CURRENT_OAUTH_SCOPES.reset(context_token)
 
 
 @dataclass(frozen=True)

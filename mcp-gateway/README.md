@@ -28,6 +28,6 @@ Legacy `jla_` agent tokens and normal JoinLayer user-session tokens are not acce
 - Request bodies, upstream payloads, and serialized MCP responses are independently bounded.
 - MCP `2026-07-28` requests are stateless and may use any gateway replica; sealed request state is audience- and OAuth-principal-bound.
 - Authentication attempts are source-rate-limited; authorized requests use an OAuth-client rate bucket.
-- Missing or invalid credentials return an RFC 6750 challenge with `resource_metadata`; missing tool scopes return `403 insufficient_scope` with the exact required scope.
+- Missing or invalid credentials return an RFC 6750 challenge with `resource_metadata`. Missing tool scopes return the exact scope through either the OpenAI MCP tool-result challenge used by ChatGPT/Codex or the transport-level `403 insufficient_scope` retained for other MCP clients.
 
 The generic compose file binds the gateway to loopback. Internet-facing deployments terminate TLS at the provided Caddy route or an equivalent trusted reverse proxy.

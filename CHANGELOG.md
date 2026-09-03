@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 — 2026-09-03
+
+- Publish explicit per-tool OAuth security metadata for MCP clients.
+- Support ChatGPT and Codex incremental authorization through tool-level OAuth
+  challenges without dispatching an under-scoped tool call.
+- Preserve the standard HTTP 403 challenge contract for Claude Code and other
+  MCP clients that do not implement OpenAI tool-level authorization.
+
 ## 0.1.2 — 2026-09-02
 
 - Treat customer- and third-party-controlled values returned through MCP as

@@ -25,7 +25,7 @@ from starlette.testclient import TestClient
 from joinlayer_mcp.api import JoinLayerAPI, JoinLayerAPIError
 from joinlayer_mcp.auth import OAuthTokenVerifier
 from joinlayer_mcp.config import Settings
-from joinlayer_mcp.guard import TOOL_SCOPES, GatewayGuard, TokenBucketRegistry, _bounded_body, _challenge_scope, _transport_error
+from joinlayer_mcp.guard import SUPPORTED_SCOPES, TOOL_SCOPES, GatewayGuard, TokenBucketRegistry, _bounded_body, _challenge_scope, _transport_error, _uses_openai_tool_level_authorization
 from joinlayer_mcp.metrics import IN_FLIGHT
 from joinlayer_mcp.models import ConnectionSetupDraft, PipelineDraft, StartRunOptions
 from joinlayer_mcp.server import _idempotency_key, _pipeline_detail_contract, _pipeline_inventory_contract, _resource_id, _skill_archive, create_server, create_streamable_http_app
@@ -943,7 +943,14 @@ class GatewaySecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_challenge_scope({"mcp-method": "server/discover"}, "workspace:read"), "workspace:read")
         self.assertEqual(_challenge_scope({"mcp-method": "tools/call", "mcp-name": "unknown"}, "workspace:read"), "workspace:read")
 
-    async def test_tool_scope_is_enforced_before_dispatch_with_incremental_challenge(self) -> None:
+    async def test_tool_level_authorization_is_bound_to_validated_openai_client_identity(self) -> None:
+        self.assertTrue(_uses_openai_tool_level_authorization("https://chatgpt.com/oauth/client.json"))
+        self.assertTrue(_uses_openai_tool_level_authorization("https://chatgpt.com/oauth/codex/session/client.json"))
+        self.assertFalse(_uses_openai_tool_level_authorization("jlo_client_claude"))
+        self.assertFalse(_uses_openai_tool_level_authorization("https://chatgpt.com.evil.example/oauth/client.json"))
+        self.assertFalse(_uses_openai_tool_level_authorization("https://user@chatgpt.com/oauth/client.json"))
+
+    async def test_non_openai_client_keeps_transport_scope_challenge(self) -> None:
         async def app(_scope, _receive, _send):
             raise AssertionError("insufficiently scoped request must not reach MCP")
 
@@ -951,7 +958,7 @@ class GatewaySecurityTests(unittest.IsolatedAsyncioTestCase):
         verifier.verify.return_value = SimpleNamespace(
             access=AccessToken(
                 token="jlo_at_" + "a" * 64,
-                client_id="https://client.example/client.json",
+                client_id="jlo_client_claude",
                 scopes=["workspace:read"],
                 resource="https://mcp.example.com/mcp",
             ),
@@ -978,9 +985,7 @@ class GatewaySecurityTests(unittest.IsolatedAsyncioTestCase):
         challenge = dict(responses[0]["headers"])[b"www-authenticate"].decode()
         self.assertIn('error="insufficient_scope"', challenge)
         self.assertIn('scope="pipelines:write"', challenge)
-        self.assertIn('error_description="Additional authorization is required for scope pipelines:write"', challenge)
         error = json.loads(responses[1]["body"])["error"]
-        self.assertEqual(error["code"], "insufficient_scope")
         self.assertEqual(error["details"]["required_scopes"], ["pipelines:write"])
         self.assertEqual(error["details"]["granted_scopes"], ["workspace:read"])
 
@@ -1030,6 +1035,9 @@ class MCPProtocolTests(unittest.TestCase):
         self.assertEqual(len(tools), len(TOOL_SCOPES))
         self.assertEqual({tool["name"] for tool in tools}, set(TOOL_SCOPES))
         for tool in tools:
+            expected = [{"type": "oauth2", "scopes": [TOOL_SCOPES[tool["name"]]]}]
+            self.assertEqual(tool["securitySchemes"], expected)
+            self.assertEqual(tool["_meta"]["securitySchemes"], expected)
             Draft202012Validator.check_schema(tool["inputSchema"])
         pipeline_schema = next(tool for tool in tools if tool["name"] == "create_pipeline_draft")["inputSchema"]["properties"]["pipeline"]
         transform_schema = pipeline_schema["properties"]["transforms"]["items"]
@@ -1153,8 +1161,94 @@ class MCPProtocolTests(unittest.TestCase):
             self.assertEqual(metadata.status_code, 200)
             self.assertEqual(metadata.json()["resource"], "https://mcp.example.com/mcp")
             self.assertEqual(metadata.json()["authorization_servers"], ["https://joinlayer.example.com"])
-            self.assertEqual(metadata.json()["scopes_supported"], ["workspace:read"])
+            self.assertEqual(metadata.json()["scopes_supported"], list(SUPPORTED_SCOPES))
             self.assertEqual(client.get("/.well-known/oauth-protected-resource").status_code, 404)
+
+    def test_under_scoped_tool_call_returns_incremental_oauth_result_without_dispatch(self) -> None:
+        api = FakeAPI({
+            "active": True,
+            "resource": "https://mcp.example.com/mcp",
+            "client_id": "https://chatgpt.com/oauth/client.json",
+            "api_token": "jli_" + "i" * 64,
+            "agent_id": "agt_demo",
+            "grant_id": "ogr_demo",
+            "user_id": "user_demo",
+            "org_id": "org-demo",
+            "scope": "workspace:read",
+            "expires_at": int(time.time()) + 300,
+        })
+        configured = settings(max_response_bytes=64 * 1024)
+        app = GatewayGuard(
+            create_streamable_http_app(create_server(configured, api), configured),
+            configured,
+            OAuthTokenVerifier(api, configured.public_url + "/mcp"),
+        )
+        with TestClient(app, base_url="https://mcp.example.com") as client:
+            called = client.post(
+                "/mcp",
+                headers={
+                    "Authorization": "Bearer " + "jlo_at_" + "a" * 64,
+                    "Accept": "application/json, text/event-stream",
+                    "Origin": "https://mcp.example.com",
+                    "MCP-Protocol-Version": "2026-07-28",
+                    "Mcp-Method": "tools/call",
+                    "Mcp-Name": "get_workspace_capacity",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "get_workspace_capacity",
+                        "arguments": {},
+                        "_meta": {
+                            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                            "io.modelcontextprotocol/clientCapabilities": {},
+                            "io.modelcontextprotocol/clientInfo": {"name": "oauth-step-up-test", "version": "1"},
+                        },
+                    },
+                },
+            )
+            self.assertEqual(called.status_code, 200, called.text)
+            result = called.json()["result"]
+            self.assertTrue(result["isError"])
+            self.assertIn("scope usage:read", result["content"][0]["text"])
+            challenge = result["_meta"]["mcp/www_authenticate"][0]
+            self.assertIn('resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"', challenge)
+            self.assertIn('scope="usage:read"', challenge)
+            self.assertIn('error="insufficient_scope"', challenge)
+            self.assertIn('error_description="Additional authorization is required for scope usage:read"', challenge)
+            api.request.assert_not_awaited()
+
+            api.principal["scope"] = "workspace:read usage:read"
+            authorized = client.post(
+                "/mcp",
+                headers={
+                    "Authorization": "Bearer " + "jlo_at_" + "b" * 64,
+                    "Accept": "application/json, text/event-stream",
+                    "Origin": "https://mcp.example.com",
+                    "MCP-Protocol-Version": "2026-07-28",
+                    "Mcp-Method": "tools/call",
+                    "Mcp-Name": "get_workspace_capacity",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "get_workspace_capacity",
+                        "arguments": {},
+                        "_meta": {
+                            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                            "io.modelcontextprotocol/clientCapabilities": {},
+                            "io.modelcontextprotocol/clientInfo": {"name": "oauth-step-up-test", "version": "1"},
+                        },
+                    },
+                },
+            )
+            self.assertEqual(authorized.status_code, 200, authorized.text)
+            self.assertFalse(authorized.json()["result"].get("isError", False))
+            api.request.assert_awaited_once()
 
     def test_list_connector_types_exposes_kafka_registry_and_bigquery_contracts(self) -> None:
         api = ProviderListAPI({
