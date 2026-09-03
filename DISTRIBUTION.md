@@ -21,7 +21,7 @@ byte for byte.
 
 - The official MCP Registry lists active server `app.joinlayer/mcp` version `0.1.2` with the production Streamable HTTP endpoint.
 - skills.sh discovers and installs `joinlayer-pipelines` from this repository.
-- The repository marketplaces install `joinlayer@joinlayer` for Codex and Claude Code; the repository package version is `0.1.3`.
+- The repository marketplaces install `joinlayer@joinlayer` for Codex and Claude Code; the repository package version is `0.1.4`.
 - mcpservers.org accepted the free listing submission and is reviewing it.
 - OpenAI marketplace publication is not yet complete; reviewer E2E and final submission remain.
 - Anthropic's central community marketplace submission remains an authenticated Console action; the repository marketplace is already usable without it.

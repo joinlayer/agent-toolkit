@@ -10,10 +10,10 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
 from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
-from mcp.types import CallToolResult, TextContent
+from mcp.types import SERVER_INFO_META_KEY, CallToolResult, TextContent
 from pydantic import BaseModel
 
-from .api import JoinLayerAPIError
+from .api import MCP_CONTRACT_VERSION, JoinLayerAPIError
 from .auth import (
     OAuthTokenVerifier,
     current_oauth_scopes,
@@ -79,8 +79,9 @@ class MCPToolAuthorizationMiddleware:
     rejected here so it never reaches a JoinLayer API tool handler.
     """
 
-    def __init__(self, resource_metadata_url: str) -> None:
+    def __init__(self, resource_metadata_url: str, server_info: Mapping[str, Any]) -> None:
         self.resource_metadata_url = resource_metadata_url
+        self.server_info = dict(server_info)
 
     async def __call__(self, ctx: ServerRequestContext[Any, Any], call_next: CallNext) -> HandlerResult:
         if ctx.method == "tools/list":
@@ -101,9 +102,15 @@ class MCPToolAuthorizationMiddleware:
             message,
         )
         REJECTIONS.labels("insufficient_scope", "mcp").inc()
+        response_meta: dict[str, Any] = {"mcp/www_authenticate": [challenge]}
+        if ctx.protocol_version == MCP_CONTRACT_VERSION:
+            # Middleware that short-circuits without call_next owns the complete
+            # wire result. Preserve the modern protocol's required server stamp
+            # that the SDK serializer would otherwise add after a tool handler.
+            response_meta[SERVER_INFO_META_KEY] = dict(self.server_info)
         return CallToolResult(
             content=[TextContent(type="text", text=message)],
-            _meta={"mcp/www_authenticate": [challenge]},
+            _meta=response_meta,
             isError=True,
         )
 

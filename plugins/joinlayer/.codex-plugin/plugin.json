@@ -1,6 +1,6 @@
 {
   "name": "joinlayer",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Build and operate secure JoinLayer data pipelines through hosted MCP and browser OAuth.",
   "author": {
     "name": "JoinLayer",

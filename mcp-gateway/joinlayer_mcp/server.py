@@ -18,7 +18,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from .api import JoinLayerAPI, JoinLayerAPIError
+from .api import MCP_CONTRACT_VERSION, JoinLayerAPI, JoinLayerAPIError
 from .auth import current_api_token, current_oauth_principal
 from .config import Settings
 from .guard import MCPToolAuthorizationMiddleware, SUPPORTED_SCOPES, TOOL_SCOPES
@@ -74,6 +74,13 @@ VALIDATE_EXTERNAL = ToolAnnotations(
 
 def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPServer:
     api = api or JoinLayerAPI(settings)
+    server_info = {
+        "name": "JoinLayer",
+        "version": MCP_CONTRACT_VERSION,
+        "title": "JoinLayer Agentic Product Interface",
+        "description": "Secure workspace-scoped data integration tools for delegated agents.",
+        "websiteUrl": settings.docs_url,
+    }
 
     @asynccontextmanager
     async def lifespan(_):
@@ -83,9 +90,9 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
             await api.close()
 
     mcp = MCPServer(
-        "JoinLayer",
-        title="JoinLayer Agentic Product Interface",
-        description="Secure workspace-scoped data integration tools for delegated agents.",
+        server_info["name"],
+        title=server_info["title"],
+        description=server_info["description"],
         instructions=(
             "On the first JoinLayer request, call get_workspace_context and get_workspace_capacity, then use "
             "list_connections and list_pipelines to inspect current state before proposing a mutation. Report the "
@@ -93,8 +100,8 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
             "every pipeline before starting it. Never ask for or transmit database, SSH, cloud, or API credentials "
             f"through MCP tool arguments. Setup and operating guide: {settings.docs_url}"
         ),
-        website_url=settings.docs_url,
-        version="2026-07-28",
+        website_url=server_info["websiteUrl"],
+        version=server_info["version"],
         lifespan=lifespan,
         request_state_security=RequestStateSecurity(
             keys=list(settings.request_state_keys),
@@ -104,7 +111,10 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
         ),
         middleware=[
             MCPToolMetricsMiddleware(frozenset(TOOL_SCOPES)),
-            MCPToolAuthorizationMiddleware(settings.public_url + "/.well-known/oauth-protected-resource/mcp"),
+            MCPToolAuthorizationMiddleware(
+                settings.public_url + "/.well-known/oauth-protected-resource/mcp",
+                server_info,
+            ),
         ],
     )
 

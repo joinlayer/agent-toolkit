@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4 — 2026-09-03
+
+- Preserve the required MCP 2026 server identity stamp on incremental OAuth
+  authorization results returned directly by gateway middleware.
+
 ## 0.1.3 — 2026-09-03
 
 - Publish explicit per-tool OAuth security metadata for MCP clients.

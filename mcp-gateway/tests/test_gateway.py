@@ -1214,6 +1214,16 @@ class MCPProtocolTests(unittest.TestCase):
             self.assertTrue(result["isError"])
             self.assertIn("scope usage:read", result["content"][0]["text"])
             challenge = result["_meta"]["mcp/www_authenticate"][0]
+            self.assertEqual(
+                result["_meta"]["io.modelcontextprotocol/serverInfo"],
+                {
+                    "name": "JoinLayer",
+                    "version": "2026-07-28",
+                    "title": "JoinLayer Agentic Product Interface",
+                    "description": "Secure workspace-scoped data integration tools for delegated agents.",
+                    "websiteUrl": configured.docs_url,
+                },
+            )
             self.assertIn('resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"', challenge)
             self.assertIn('scope="usage:read"', challenge)
             self.assertIn('error="insufficient_scope"', challenge)
