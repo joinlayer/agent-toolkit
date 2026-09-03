@@ -935,7 +935,7 @@ class GatewaySecurityTests(unittest.IsolatedAsyncioTestCase):
         headers = dict(responses[0]["headers"])
         challenge = headers[b"www-authenticate"].decode()
         self.assertIn('resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"', challenge)
-        self.assertIn('scope="workspace:read"', challenge)
+        self.assertIn(f'scope="{" ".join(SUPPORTED_SCOPES)}"', challenge)
 
     async def test_unauthenticated_tool_challenge_requests_only_current_operation_scope(self) -> None:
         self.assertEqual(_challenge_scope({"mcp-method": "tools/call", "mcp-name": "create_pipeline_draft"}, "workspace:read"), "pipelines:write")
@@ -984,7 +984,7 @@ class GatewaySecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(responses[0]["status"], 403)
         challenge = dict(responses[0]["headers"])[b"www-authenticate"].decode()
         self.assertIn('error="insufficient_scope"', challenge)
-        self.assertIn('scope="pipelines:write"', challenge)
+        self.assertIn('scope="workspace:read pipelines:write"', challenge)
         error = json.loads(responses[1]["body"])["error"]
         self.assertEqual(error["details"]["required_scopes"], ["pipelines:write"])
         self.assertEqual(error["details"]["granted_scopes"], ["workspace:read"])
@@ -1225,7 +1225,7 @@ class MCPProtocolTests(unittest.TestCase):
                 },
             )
             self.assertIn('resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"', challenge)
-            self.assertIn('scope="usage:read"', challenge)
+            self.assertIn('scope="workspace:read usage:read"', challenge)
             self.assertIn('error="insufficient_scope"', challenge)
             self.assertIn('error_description="Additional authorization is required for scope usage:read"', challenge)
             api.request.assert_not_awaited()

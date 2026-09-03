@@ -95,9 +95,10 @@ class MCPToolAuthorizationMiddleware:
             return await call_next(ctx)
 
         message = f"Additional authorization is required for scope {required_scope}"
+        authorization_scope = _incremental_authorization_scope(current_oauth_scopes(), required_scope)
         challenge = _oauth_challenge(
             self.resource_metadata_url,
-            required_scope,
+            authorization_scope,
             "insufficient_scope",
             message,
         )
@@ -224,7 +225,13 @@ class GatewayGuard:
         self.allowed_hosts = frozenset(host.lower() for host in settings.allowed_hosts)
         self.allowed_origins = frozenset(origin.lower() for origin in settings.allowed_origins)
         self.resource_metadata_url = settings.public_url + "/.well-known/oauth-protected-resource/mcp"
-        self.initial_scope = "workspace:read"
+        # The transport cannot retain the exact tool-level challenge when an
+        # MCP client starts a fresh unauthenticated connection for OAuth. Give
+        # it the complete advertised capability set so the authorization UI
+        # can present the real permissions and let the user grant a subset.
+        # A single workspace-only default creates a refresh/401 loop for
+        # clients such as ChatGPT after an incremental authorization result.
+        self.initial_scope = " ".join(SUPPORTED_SCOPES)
         self._active = 0
         self._active_lock = asyncio.Lock()
 
@@ -362,7 +369,7 @@ class GatewayGuard:
                         message = f"Additional authorization is required for scope {required_scope}"
                         challenge = _oauth_challenge(
                             self.resource_metadata_url,
-                            required_scope,
+                            _incremental_authorization_scope(access.scopes, required_scope),
                             "insufficient_scope",
                             message,
                         )
@@ -448,6 +455,13 @@ def _oauth_challenge(metadata_url: str, scopes: str, error: str | None = None, e
     if error_description:
         values.append(f'error_description="{error_description}"')
     return "Bearer " + ", ".join(values)
+
+
+def _incremental_authorization_scope(granted_scopes: Any, required_scope: str) -> str:
+    """Keep an OAuth step-up cumulative instead of replacing prior access."""
+    requested = {str(scope) for scope in granted_scopes}
+    requested.add(required_scope)
+    return " ".join(scope for scope in SUPPORTED_SCOPES if scope in requested)
 
 
 def _required_tool_scope(body: bytes) -> str | None:
