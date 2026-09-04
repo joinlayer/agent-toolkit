@@ -46,8 +46,10 @@ the granted scopes, report capacity and blockers, summarize connections and
 pipelines, and explicitly say that no state changed.
 
 For this broad first inspection, the agent should call
-`get_workspace_overview` first. It requests the four required read-only scopes
-in one browser consent and returns the complete overview in one result.
+`get_workspace_overview` first. It requests every read-only inspection scope
+available to the current role in one browser consent and returns the complete
+role-visible overview in one result. Capacity is marked admin-only for viewers
+and operators without repeating consent.
 
 ## 3. Choose A Goal
 

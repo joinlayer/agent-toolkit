@@ -1,7 +1,7 @@
 interface:
   display_name: "JoinLayer Pipelines"
   short_description: "Build and operate safe enriched data pipelines"
-  default_prompt: "Use $joinlayer-pipelines. First call get_workspace_overview to inspect the authenticated workspace, scopes, capacity, connections, and pipelines in one read-only operation. Do not change anything until the requested outcome and current state are clear."
+  default_prompt: "Use $joinlayer-pipelines. First call get_workspace_overview to inspect the authenticated workspace, scopes, role-visible capacity, connections, and pipelines in one read-only operation. Do not change anything until the requested outcome and current state are clear."
 dependencies:
   tools:
     - type: "mcp"

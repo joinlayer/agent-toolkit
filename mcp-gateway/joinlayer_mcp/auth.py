@@ -11,6 +11,7 @@ from .api import JoinLayerAPI, JoinLayerAPIError
 _CURRENT_API_TOKEN: ContextVar[str | None] = ContextVar("joinlayer_mcp_api_token", default=None)
 _CURRENT_OAUTH_PRINCIPAL: ContextVar[str | None] = ContextVar("joinlayer_mcp_oauth_principal", default=None)
 _CURRENT_OAUTH_SCOPES: ContextVar[frozenset[str]] = ContextVar("joinlayer_mcp_oauth_scopes", default=frozenset())
+_CURRENT_OAUTH_ROLE: ContextVar[str | None] = ContextVar("joinlayer_mcp_oauth_role", default=None)
 
 
 def current_api_token() -> str:
@@ -52,11 +53,24 @@ def reset_current_oauth_scopes(context_token: Token[frozenset[str]]) -> None:
     _CURRENT_OAUTH_SCOPES.reset(context_token)
 
 
+def current_oauth_role() -> str | None:
+    return _CURRENT_OAUTH_ROLE.get()
+
+
+def set_current_oauth_role(role: str | None) -> Token[str | None]:
+    return _CURRENT_OAUTH_ROLE.set(role)
+
+
+def reset_current_oauth_role(context_token: Token[str | None]) -> None:
+    _CURRENT_OAUTH_ROLE.reset(context_token)
+
+
 @dataclass(frozen=True)
 class OAuthVerification:
     access: AccessToken
     api_token: str
     principal_key: str
+    role: str
 
 
 class OAuthTokenVerifier(TokenVerifier):
@@ -84,6 +98,7 @@ class OAuthTokenVerifier(TokenVerifier):
         org_id = str(principal.get("org_id") or "").strip()
         user_id = str(principal.get("user_id") or "").strip()
         grant_id = str(principal.get("grant_id") or "").strip()
+        role = str(principal.get("role") or "").strip().lower()
         try:
             expires_at = int(principal.get("expires_at") or 0)
         except (TypeError, ValueError):
@@ -96,6 +111,7 @@ class OAuthTokenVerifier(TokenVerifier):
             or not org_id
             or not user_id
             or not grant_id
+            or role not in {"viewer", "operator", "admin"}
             or expires_at <= int(time.time())
         ):
             return None
@@ -107,12 +123,13 @@ class OAuthTokenVerifier(TokenVerifier):
             expires_at=expires_at,
             resource=resource,
             subject=user_id,
-            claims={"act": agent_id, "org_id": org_id, "grant_id": grant_id},
+            claims={"act": agent_id, "org_id": org_id, "grant_id": grant_id, "role": role},
         )
         return OAuthVerification(
             access=access,
             api_token=api_token,
             principal_key="\x1f".join((grant_id, client_id, user_id, agent_id, org_id)),
+            role=role,
         )
 
     async def verify_token(self, token: str) -> AccessToken | None:

@@ -19,7 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from .api import MCP_CONTRACT_VERSION, JoinLayerAPI, JoinLayerAPIError
-from .auth import current_api_token, current_oauth_principal
+from .auth import current_api_token, current_oauth_principal, current_oauth_scopes
 from .config import Settings
 from .guard import MCPToolAuthorizationMiddleware, SUPPORTED_SCOPES, TOOL_SCOPES
 from .metrics import MCPToolMetricsMiddleware
@@ -94,7 +94,7 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
         title=server_info["title"],
         description=server_info["description"],
         instructions=(
-            "On the first JoinLayer request, call get_workspace_overview to inspect identity, capacity, connections, "
+            "On the first JoinLayer request, call get_workspace_overview to inspect identity, role-visible capacity, connections, "
             "and pipelines in one read-only operation before proposing a mutation. Report the "
             "authenticated workspace, identity, scopes, blockers, and whether state changed. Validate and preview "
             "every pipeline before starting it. Never ask for or transmit database, SSH, cloud, or API credentials "
@@ -205,9 +205,17 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
 
     @mcp.tool(annotations=READ_ONLY)
     async def get_workspace_overview() -> dict[str, Any]:
-        """Inspect identity, capacity, connections, and pipelines in one read-only first-session operation."""
+        """Inspect identity, role-visible capacity, connections, and pipelines in one read-only first-session operation."""
         workspace = await call("GET", "/me", tool_name="get_workspace_overview")
-        capacity = await call("GET", "/billing/usage", tool_name="get_workspace_overview")
+        if "usage:read" in current_oauth_scopes():
+            capacity = await call("GET", "/billing/usage", tool_name="get_workspace_overview")
+        else:
+            capacity = {
+                "available": False,
+                "reason": "requires_admin_role",
+                "required_scope": "usage:read",
+                "message": "Workspace capacity and usage are visible to workspace administrators.",
+            }
         connections = await call(
             "GET",
             "/connections",
@@ -528,7 +536,7 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
     def first_session_guide() -> str:
         """Return the mandatory discovery sequence for a new JoinLayer agent session."""
         return (
-            "First call get_workspace_overview and verify the workspace, identity, role, scopes, capacity, connections, "
+            "First call get_workspace_overview and verify the workspace, identity, role, scopes, role-visible capacity, connections, "
             "and pipelines. For a read-only first check, summarize those results and make no mutations. Never "
             "substitute guessed IDs, direct database access, or requests "
             f"for credentials. Full guide: {settings.docs_url}"

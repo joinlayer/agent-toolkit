@@ -33,6 +33,8 @@ from joinlayer_mcp.server import _idempotency_key, _pipeline_detail_contract, _p
 
 class FakeAPI:
     def __init__(self, principal: dict | None = None, error: Exception | None = None) -> None:
+        if principal is not None and principal.get("active") is True and "role" not in principal:
+            principal = {**principal, "role": "admin"}
         self.principal = principal
         self.error = error
         self.request = AsyncMock(side_effect=self._request)
@@ -137,7 +139,11 @@ class WorkspaceOverviewAPI(FakeAPI):
         if method != "GET":
             return await super()._request(_token, method, path, **kwargs)
         if path == "/me":
-            return {"workspace": {"id": "org-demo", "name": "Demo"}, "scopes": list(TOOL_SCOPES["get_workspace_overview"])}
+            return {
+                "workspace": {"id": "org-demo", "name": "Demo"},
+                "role": self.principal["role"],
+                "scopes": str(self.principal["scope"]).split(),
+            }
         if path == "/billing/usage":
             return {"status": "ready", "blockers": []}
         if path == "/connections":
@@ -207,6 +213,7 @@ class OAuthTokenVerifierTests(unittest.IsolatedAsyncioTestCase):
         assert verification is not None
         self.assertIn("ogr_demo", verification.principal_key)
         self.assertNotIn("jlo_at_", verification.principal_key)
+        self.assertEqual(verification.role, "admin")
 
         wrong_audience = OAuthTokenVerifier(FakeAPI({
             "active": True,
@@ -220,6 +227,20 @@ class OAuthTokenVerifierTests(unittest.IsolatedAsyncioTestCase):
             "expires_at": int(time.time()) + 300,
         }), "https://mcp.example.com/mcp")
         self.assertIsNone(await wrong_audience.verify_token("jlo_at_" + "b" * 64))
+
+        missing_role = OAuthTokenVerifier(FakeAPI({
+            "active": True,
+            "resource": "https://mcp.example.com/mcp",
+            "client_id": "https://client.example/client.json",
+            "api_token": "jli_" + "i" * 64,
+            "agent_id": "agt_demo",
+            "grant_id": "ogr_demo",
+            "user_id": "user_demo",
+            "org_id": "org-demo",
+            "role": "",
+            "expires_at": int(time.time()) + 300,
+        }), "https://mcp.example.com/mcp")
+        self.assertIsNone(await missing_role.verify_token("jlo_at_" + "c" * 64))
 
     async def test_rejects_invalid_and_revoked_tokens_but_surfaces_api_outage(self) -> None:
         api = FakeAPI(error=JoinLayerAPIError(401, "unauthorized", "invalid bearer token"))
@@ -1020,6 +1041,48 @@ class GatewaySecurityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(error["details"]["granted_scopes"], ["workspace:read"])
 
+    async def test_non_admin_client_does_not_challenge_for_admin_only_overview_scope(self) -> None:
+        async def app(_scope, _receive, _send):
+            raise AssertionError("insufficiently scoped request must not reach MCP")
+
+        verifier = AsyncMock()
+        verifier.verify.return_value = SimpleNamespace(
+            access=AccessToken(
+                token="jlo_at_" + "v" * 64,
+                client_id="jlo_client_claude",
+                scopes=["workspace:read"],
+                resource="https://mcp.example.com/mcp",
+            ),
+            api_token="jli_" + "i" * 64,
+            principal_key="ogr_viewer\x1fclient\x1fuser\x1fagent\x1forg",
+            role="viewer",
+        )
+        guard = GatewayGuard(app, settings(), verifier)
+        body = b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_overview","arguments":{}}}'
+        responses = []
+
+        async def send(message):
+            responses.append(message)
+
+        await guard({
+            "type": "http", "method": "POST", "path": "/mcp", "client": ("192.0.2.32", 1000),
+            "headers": [
+                (b"host", b"mcp.example.com"),
+                (b"content-length", str(len(body)).encode()),
+                (b"authorization", ("Bearer jlo_at_" + "v" * 64).encode()),
+            ],
+        }, AsyncMock(return_value={"type": "http.request", "body": body, "more_body": False}), send)
+
+        self.assertEqual(responses[0]["status"], 403)
+        challenge = dict(responses[0]["headers"])[b"www-authenticate"].decode()
+        self.assertIn('scope="workspace:read connections:read pipelines:read"', challenge)
+        self.assertNotIn("usage:read", challenge)
+        error = json.loads(responses[1]["body"])["error"]
+        self.assertEqual(
+            error["details"]["required_scopes"],
+            ["workspace:read", "connections:read", "pipelines:read"],
+        )
+
 
 class MCPProtocolTests(unittest.TestCase):
     def test_actual_tools_list_schemas_enforce_conditional_transform_contracts(self) -> None:
@@ -1357,6 +1420,95 @@ class MCPProtocolTests(unittest.TestCase):
             [
                 ("GET", "/me", "get_workspace_overview"),
                 ("GET", "/billing/usage", "get_workspace_overview"),
+                ("GET", "/connections", "get_workspace_overview"),
+                ("GET", "/pipelines", "get_workspace_overview"),
+            ],
+        )
+
+    def test_workspace_overview_remains_usable_for_viewers_without_usage_access(self) -> None:
+        api = WorkspaceOverviewAPI({
+            "active": True,
+            "resource": "https://mcp.example.com/mcp",
+            "client_id": "https://chatgpt.com/oauth/client.json",
+            "api_token": "jli_" + "i" * 64,
+            "agent_id": "agt_viewer",
+            "grant_id": "ogr_viewer",
+            "user_id": "user_viewer",
+            "org_id": "org-demo",
+            "role": "viewer",
+            "scope": "workspace:read connections:read pipelines:read",
+            "expires_at": int(time.time()) + 300,
+        })
+        configured = settings(max_response_bytes=64 * 1024)
+        app = GatewayGuard(
+            create_streamable_http_app(create_server(configured, api), configured),
+            configured,
+            OAuthTokenVerifier(api, configured.public_url + "/mcp"),
+        )
+        headers = {
+            "Authorization": "Bearer " + "jlo_at_" + "v" * 64,
+            "Accept": "application/json, text/event-stream",
+            "Origin": "https://mcp.example.com",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "get_workspace_overview",
+        }
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "get_workspace_overview",
+                "arguments": {},
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {"name": "viewer-overview-test", "version": "1"},
+                },
+            },
+        }
+
+        with TestClient(app, base_url="https://mcp.example.com") as client:
+            list_headers = {**headers, "Mcp-Method": "tools/list"}
+            list_headers.pop("Mcp-Name")
+            listed = client.post(
+                "/mcp",
+                headers=list_headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "method": "tools/list",
+                    "params": {
+                        "_meta": {
+                            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                            "io.modelcontextprotocol/clientCapabilities": {},
+                            "io.modelcontextprotocol/clientInfo": {"name": "viewer-overview-test", "version": "1"},
+                        }
+                    },
+                },
+            )
+            authorized = client.post("/mcp", headers=headers, json=request)
+
+        self.assertEqual(listed.status_code, 200, listed.text)
+        overview_metadata = next(
+            tool for tool in listed.json()["result"]["tools"] if tool["name"] == "get_workspace_overview"
+        )
+        self.assertEqual(
+            overview_metadata["securitySchemes"],
+            [{"type": "oauth2", "scopes": ["workspace:read", "connections:read", "pipelines:read"]}],
+        )
+        self.assertEqual(authorized.status_code, 200, authorized.text)
+        result = authorized.json()["result"]
+        self.assertFalse(result.get("isError", False))
+        payload = result["structuredContent"]
+        self.assertEqual(payload["workspace"]["role"], "viewer")
+        self.assertEqual(payload["capacity"]["reason"], "requires_admin_role")
+        self.assertEqual(payload["connections"]["pagination"]["total"], 1)
+        self.assertEqual(payload["pipelines"]["summary"]["ready"], 1)
+        self.assertEqual(
+            [(call.args[1], call.args[2], call.kwargs["tool_name"]) for call in api.request.await_args_list],
+            [
+                ("GET", "/me", "get_workspace_overview"),
                 ("GET", "/connections", "get_workspace_overview"),
                 ("GET", "/pipelines", "get_workspace_overview"),
             ],

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.7 — 2026-09-04
+
+- Keep the one-call workspace overview usable for viewer and operator roles by
+  requesting only role-compatible scopes and marking admin-only capacity as
+  restricted instead of repeating OAuth consent.
+
 ## 0.1.6 — 2026-09-04
 
 - Add a single read-only workspace overview tool that requests the four scopes

@@ -16,12 +16,15 @@ from pydantic import BaseModel
 from .api import MCP_CONTRACT_VERSION, JoinLayerAPIError
 from .auth import (
     OAuthTokenVerifier,
+    current_oauth_role,
     current_oauth_scopes,
     reset_current_api_token,
     reset_current_oauth_principal,
+    reset_current_oauth_role,
     reset_current_oauth_scopes,
     set_current_api_token,
     set_current_oauth_principal,
+    set_current_oauth_role,
     set_current_oauth_scopes,
 )
 from .metrics import (
@@ -68,6 +71,10 @@ TOOL_SCOPES: dict[str, tuple[str, ...]] = {
     "get_usage_report": ("usage:read",),
 }
 
+WORKSPACE_OVERVIEW_NON_ADMIN_SCOPES = tuple(
+    scope for scope in TOOL_SCOPES["get_workspace_overview"] if scope != "usage:read"
+)
+
 SUPPORTED_SCOPES = tuple(dict.fromkeys(scope for scopes in TOOL_SCOPES.values() for scope in scopes))
 
 
@@ -91,7 +98,7 @@ class MCPToolAuthorizationMiddleware:
             return await call_next(ctx)
 
         name = ctx.params.get("name") if isinstance(ctx.params, Mapping) else None
-        required_scopes = TOOL_SCOPES.get(name) if isinstance(name, str) else None
+        required_scopes = _tool_required_scopes(name) if isinstance(name, str) else None
         if required_scopes is None:
             return await call_next(ctx)
         missing_scopes = tuple(scope for scope in required_scopes if scope not in current_oauth_scopes())
@@ -138,7 +145,7 @@ def _add_tool_security_schemes(result: HandlerResult) -> HandlerResult:
             continue
         tool = dict(item)
         name = tool.get("name")
-        required_scopes = TOOL_SCOPES.get(name) if isinstance(name, str) else None
+        required_scopes = _tool_required_scopes(name) if isinstance(name, str) else None
         if required_scopes is not None:
             schemes = [{"type": "oauth2", "scopes": list(required_scopes)}]
             tool["securitySchemes"] = schemes
@@ -281,6 +288,7 @@ class GatewayGuard:
         context_token = None
         principal_context_token = None
         scopes_context_token = None
+        role_context_token = None
         try:
             if path == "/mcp":
                 source_key = "ip:" + _client_ip(scope, headers, self.trust_proxy_headers)
@@ -337,6 +345,7 @@ class GatewayGuard:
                 context_token = set_current_api_token(verification.api_token)
                 principal_context_token = set_current_oauth_principal(verification.principal_key)
                 scopes_context_token = set_current_oauth_scopes(frozenset(access.scopes))
+                role_context_token = set_current_oauth_role(getattr(verification, "role", None))
             elif path.startswith("/skills/"):
                 key = "ip:" + _client_ip(scope, headers, self.trust_proxy_headers)
                 allowed, retry_after = await self.anonymous_buckets.allow(key)
@@ -398,6 +407,8 @@ class GatewayGuard:
                         return
             await self._observe(scope, bounded_receive, send, method, route)
         finally:
+            if role_context_token is not None:
+                reset_current_oauth_role(role_context_token)
             if scopes_context_token is not None:
                 reset_current_oauth_scopes(scopes_context_token)
             if principal_context_token is not None:
@@ -484,7 +495,14 @@ def _required_tool_scopes(body: bytes) -> tuple[str, ...] | None:
     if not isinstance(params, dict):
         return None
     name = params.get("name")
-    return TOOL_SCOPES.get(name) if isinstance(name, str) else None
+    return _tool_required_scopes(name) if isinstance(name, str) else None
+
+
+def _tool_required_scopes(name: str) -> tuple[str, ...] | None:
+    required = TOOL_SCOPES.get(name)
+    if name == "get_workspace_overview" and current_oauth_role() in {"viewer", "operator"}:
+        return WORKSPACE_OVERVIEW_NON_ADMIN_SCOPES
+    return required
 
 
 def _uses_openai_tool_level_authorization(client_id: str) -> bool:
@@ -506,7 +524,7 @@ def _uses_openai_tool_level_authorization(client_id: str) -> bool:
 def _challenge_scope(headers: dict[str, str], default: str) -> str:
     if headers.get("mcp-method", "").strip().lower() == "tools/call":
         name = headers.get("mcp-name", "").strip()
-        if required := TOOL_SCOPES.get(name):
+        if required := _tool_required_scopes(name):
             return " ".join(required)
     return default
 
