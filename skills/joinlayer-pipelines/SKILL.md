@@ -26,9 +26,9 @@ Do not wait for the user to explain JoinLayer's API and do not explore the repos
 For the first JoinLayer request in a session:
 
 1. Confirm that the `joinlayer` MCP server and its tools are available. If the client has not connected yet, use the configured MCP URL and let the client discover JoinLayer OAuth and open browser consent. Never ask the user to create, paste, reveal, or carry an agent token. If the client cannot perform MCP OAuth, stop and explain that an OAuth-capable MCP connection is required. Do not substitute shell commands, direct HTTP calls, database access, or guessed product behavior.
-2. Call `get_workspace_context`. State the workspace name/ID, agent identity, role, and granted scopes. Stop if the workspace is not the one the user expects.
-3. Call `get_workspace_capacity`. Report whether new work can start and name every returned blocker. Do not collapse independent limits into one balance.
-4. For an inspection request, call `list_connections` and `list_pipelines`, then summarize current resources without changing anything.
+2. For a broad first-session inspection, call `get_workspace_overview`. It requests the four read-only scopes together and returns workspace identity, capacity, connections, and pipelines in one result. State the workspace name/ID, agent identity, role, and granted scopes; stop if the workspace is not the one the user expects.
+3. Report whether new work can start and name every returned blocker. Do not collapse independent limits into one balance. Summarize current connections and pipelines without changing anything.
+4. Do not repeat `get_workspace_context`, `get_workspace_capacity`, `list_connections`, or `list_pipelines` after a successful overview unless the user needs fresh data, pagination, or a narrower follow-up. For a narrow request that does not need the full overview, use only the corresponding granular tool and scope.
 5. For a creation request, continue with connector discovery, stored connection discovery, and schema discovery before drafting a pipeline.
 
 For Codex CLI when the `joinlayer` MCP server is not configured, use the deployment URL declared in `agents/openai.yaml`:

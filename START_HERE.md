@@ -45,6 +45,10 @@ The response should name the authenticated workspace and agent identity, list
 the granted scopes, report capacity and blockers, summarize connections and
 pipelines, and explicitly say that no state changed.
 
+For this broad first inspection, the agent should call
+`get_workspace_overview` first. It requests the four required read-only scopes
+in one browser consent and returns the complete overview in one result.
+
 ## 3. Choose A Goal
 
 | Goal | Copy this prompt |

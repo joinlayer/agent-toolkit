@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.6 — 2026-09-04
+
+- Add a single read-only workspace overview tool that requests the four scopes
+  needed for workspace identity, capacity, connections, and pipelines in one
+  browser consent and one MCP call.
+- Keep granular tools narrowly scoped for follow-up tasks and least-privilege
+  clients.
+
+## 0.1.5 — 2026-09-04
+
+- Preserve cumulative OAuth scopes across stateless transport reconnects.
+
 ## 0.1.4 — 2026-09-03
 
 - Preserve the required MCP 2026 server identity stamp on incremental OAuth

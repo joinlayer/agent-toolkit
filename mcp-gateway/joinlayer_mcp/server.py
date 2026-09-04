@@ -94,8 +94,8 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
         title=server_info["title"],
         description=server_info["description"],
         instructions=(
-            "On the first JoinLayer request, call get_workspace_context and get_workspace_capacity, then use "
-            "list_connections and list_pipelines to inspect current state before proposing a mutation. Report the "
+            "On the first JoinLayer request, call get_workspace_overview to inspect identity, capacity, connections, "
+            "and pipelines in one read-only operation before proposing a mutation. Report the "
             "authenticated workspace, identity, scopes, blockers, and whether state changed. Validate and preview "
             "every pipeline before starting it. Never ask for or transmit database, SSH, cloud, or API credentials "
             f"through MCP tool arguments. Setup and operating guide: {settings.docs_url}"
@@ -202,6 +202,30 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
         except JoinLayerAPIError as exc:
             details = f" Details: {json.dumps(exc.details, default=str)}" if exc.details is not None else ""
             raise ValueError(f"{exc.code}: {exc.message}.{details}") from exc
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def get_workspace_overview() -> dict[str, Any]:
+        """Inspect identity, capacity, connections, and pipelines in one read-only first-session operation."""
+        workspace = await call("GET", "/me", tool_name="get_workspace_overview")
+        capacity = await call("GET", "/billing/usage", tool_name="get_workspace_overview")
+        connections = await call(
+            "GET",
+            "/connections",
+            params={"limit": 50, "offset": 0},
+            tool_name="get_workspace_overview",
+        )
+        pipelines = await call(
+            "GET",
+            "/pipelines",
+            params={"limit": 50, "offset": 0},
+            tool_name="get_workspace_overview",
+        )
+        return {
+            "workspace": workspace,
+            "capacity": capacity,
+            "connections": connections,
+            "pipelines": _pipeline_inventory_contract(pipelines),
+        }
 
     @mcp.tool(annotations=READ_ONLY)
     async def get_workspace_context() -> dict[str, Any]:
@@ -504,9 +528,9 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
     def first_session_guide() -> str:
         """Return the mandatory discovery sequence for a new JoinLayer agent session."""
         return (
-            "First call get_workspace_context and verify the workspace, identity, role, and scopes. Then call "
-            "get_workspace_capacity, list_connections, and list_pipelines. For a read-only first check, summarize "
-            "those results and make no mutations. Never substitute guessed IDs, direct database access, or requests "
+            "First call get_workspace_overview and verify the workspace, identity, role, scopes, capacity, connections, "
+            "and pipelines. For a read-only first check, summarize those results and make no mutations. Never "
+            "substitute guessed IDs, direct database access, or requests "
             f"for credentials. Full guide: {settings.docs_url}"
         )
 

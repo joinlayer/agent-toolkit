@@ -132,6 +132,29 @@ class PipelineListAPI(FakeAPI):
         return await super()._request(_token, method, path, **kwargs)
 
 
+class WorkspaceOverviewAPI(FakeAPI):
+    async def _request(self, _token, method, path, **kwargs):
+        if method != "GET":
+            return await super()._request(_token, method, path, **kwargs)
+        if path == "/me":
+            return {"workspace": {"id": "org-demo", "name": "Demo"}, "scopes": list(TOOL_SCOPES["get_workspace_overview"])}
+        if path == "/billing/usage":
+            return {"status": "ready", "blockers": []}
+        if path == "/connections":
+            return {
+                "connections": [{"id": "conn_demo", "name": "Demo source", "type": "postgres_cdc"}],
+                "pagination": {"limit": 50, "offset": 0, "total": 1, "has_more": False},
+                "summary": {"total": 1},
+            }
+        if path == "/pipelines":
+            return {
+                "pipelines": [{"id": "pipe_demo", "status": "DRAFT", "inventory_state": "ready"}],
+                "pagination": {"limit": 50, "offset": 0, "total": 1, "has_more": False},
+                "summary": {"all": 1, "operational": 0, "ready": 1, "attention": 0, "draft": 0},
+            }
+        return await super()._request(_token, method, path, **kwargs)
+
+
 class PipelineDraftAPI(FakeAPI):
     async def _request(self, _token, method, path, **kwargs):
         if method == "POST" and path == "/pipelines":
@@ -442,6 +465,7 @@ class ContractTests(unittest.TestCase):
             **{
                 name: (True, False, True, False)
                 for name in (
+                    "get_workspace_overview",
                     "get_workspace_context",
                     "get_workspace_capacity",
                     "list_connector_types",
@@ -755,17 +779,17 @@ class GatewaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 "diagnose_run_failure",
             )
         }, {
-            "discover_connection_schema": "connections:test",
-            "test_connection": "connections:test",
-            "get_connection_setup_status": "connections:test",
-            "list_connection_setups": "connections:test",
-            "list_activity": "runs:read",
-            "list_agent_approvals": "runs:read",
-            "validate_pipeline": "pipelines:validate",
-            "preview_pipeline": "pipelines:validate",
-            "list_pipeline_runs": "runs:read",
-            "get_run": "runs:read",
-            "diagnose_run_failure": "diagnostics:read",
+            "discover_connection_schema": ("connections:test",),
+            "test_connection": ("connections:test",),
+            "get_connection_setup_status": ("connections:test",),
+            "list_connection_setups": ("connections:test",),
+            "list_activity": ("runs:read",),
+            "list_agent_approvals": ("runs:read",),
+            "validate_pipeline": ("pipelines:validate",),
+            "preview_pipeline": ("pipelines:validate",),
+            "list_pipeline_runs": ("runs:read",),
+            "get_run": ("runs:read",),
+            "diagnose_run_failure": ("diagnostics:read",),
         })
 
     async def test_transport_allowlist_rejects_wrong_host_and_origin(self) -> None:
@@ -938,6 +962,10 @@ class GatewaySecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f'scope="{" ".join(SUPPORTED_SCOPES)}"', challenge)
 
     async def test_unauthenticated_tool_challenge_requests_only_current_operation_scope(self) -> None:
+        self.assertEqual(
+            _challenge_scope({"mcp-method": "tools/call", "mcp-name": "get_workspace_overview"}, "workspace:read"),
+            "workspace:read usage:read connections:read pipelines:read",
+        )
         self.assertEqual(_challenge_scope({"mcp-method": "tools/call", "mcp-name": "create_pipeline_draft"}, "workspace:read"), "pipelines:write")
         self.assertEqual(_challenge_scope({"mcp-method": "tools/call", "mcp-name": "cancel_agent_approval"}, "workspace:read"), "runs:read")
         self.assertEqual(_challenge_scope({"mcp-method": "server/discover"}, "workspace:read"), "workspace:read")
@@ -966,7 +994,7 @@ class GatewaySecurityTests(unittest.IsolatedAsyncioTestCase):
             principal_key="ogr_demo\x1fclient\x1fuser\x1fagent\x1forg",
         )
         guard = GatewayGuard(app, settings(), verifier)
-        body = b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_pipeline_draft","arguments":{}}}'
+        body = b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_overview","arguments":{}}}'
         responses = []
 
         async def send(message):
@@ -984,9 +1012,12 @@ class GatewaySecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(responses[0]["status"], 403)
         challenge = dict(responses[0]["headers"])[b"www-authenticate"].decode()
         self.assertIn('error="insufficient_scope"', challenge)
-        self.assertIn('scope="workspace:read pipelines:write"', challenge)
+        self.assertIn('scope="workspace:read usage:read connections:read pipelines:read"', challenge)
         error = json.loads(responses[1]["body"])["error"]
-        self.assertEqual(error["details"]["required_scopes"], ["pipelines:write"])
+        self.assertEqual(
+            error["details"]["required_scopes"],
+            ["workspace:read", "usage:read", "connections:read", "pipelines:read"],
+        )
         self.assertEqual(error["details"]["granted_scopes"], ["workspace:read"])
 
 
@@ -1035,7 +1066,7 @@ class MCPProtocolTests(unittest.TestCase):
         self.assertEqual(len(tools), len(TOOL_SCOPES))
         self.assertEqual({tool["name"] for tool in tools}, set(TOOL_SCOPES))
         for tool in tools:
-            expected = [{"type": "oauth2", "scopes": [TOOL_SCOPES[tool["name"]]]}]
+            expected = [{"type": "oauth2", "scopes": list(TOOL_SCOPES[tool["name"]])}]
             self.assertEqual(tool["securitySchemes"], expected)
             self.assertEqual(tool["_meta"]["securitySchemes"], expected)
             Draft202012Validator.check_schema(tool["inputSchema"])
@@ -1259,6 +1290,77 @@ class MCPProtocolTests(unittest.TestCase):
             self.assertEqual(authorized.status_code, 200, authorized.text)
             self.assertFalse(authorized.json()["result"].get("isError", False))
             api.request.assert_awaited_once()
+
+    def test_workspace_overview_requests_one_complete_read_scope_set_and_returns_one_result(self) -> None:
+        api = WorkspaceOverviewAPI({
+            "active": True,
+            "resource": "https://mcp.example.com/mcp",
+            "client_id": "https://chatgpt.com/oauth/client.json",
+            "api_token": "jli_" + "i" * 64,
+            "agent_id": "agt_demo",
+            "grant_id": "ogr_demo",
+            "user_id": "user_demo",
+            "org_id": "org-demo",
+            "scope": "workspace:read",
+            "expires_at": int(time.time()) + 300,
+        })
+        configured = settings(max_response_bytes=64 * 1024)
+        app = GatewayGuard(
+            create_streamable_http_app(create_server(configured, api), configured),
+            configured,
+            OAuthTokenVerifier(api, configured.public_url + "/mcp"),
+        )
+        headers = {
+            "Authorization": "Bearer " + "jlo_at_" + "a" * 64,
+            "Accept": "application/json, text/event-stream",
+            "Origin": "https://mcp.example.com",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "get_workspace_overview",
+        }
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "get_workspace_overview",
+                "arguments": {},
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {"name": "workspace-overview-test", "version": "1"},
+                },
+            },
+        }
+
+        with TestClient(app, base_url="https://mcp.example.com") as client:
+            under_scoped = client.post("/mcp", headers=headers, json=request)
+            self.assertEqual(under_scoped.status_code, 200, under_scoped.text)
+            challenge = under_scoped.json()["result"]["_meta"]["mcp/www_authenticate"][0]
+            self.assertIn('scope="workspace:read usage:read connections:read pipelines:read"', challenge)
+            self.assertIn("scopes usage:read connections:read pipelines:read", under_scoped.json()["result"]["content"][0]["text"])
+            api.request.assert_not_awaited()
+
+            api.principal["scope"] = "workspace:read usage:read connections:read pipelines:read"
+            request["id"] = 2
+            authorized = client.post("/mcp", headers=headers, json=request)
+
+        self.assertEqual(authorized.status_code, 200, authorized.text)
+        result = authorized.json()["result"]
+        self.assertFalse(result.get("isError", False))
+        payload = result["structuredContent"]
+        self.assertEqual(payload["workspace"]["workspace"]["id"], "org-demo")
+        self.assertEqual(payload["connections"]["pagination"]["total"], 1)
+        self.assertEqual(payload["pipelines"]["summary"]["ready"], 1)
+        self.assertEqual(
+            [(call.args[1], call.args[2], call.kwargs["tool_name"]) for call in api.request.await_args_list],
+            [
+                ("GET", "/me", "get_workspace_overview"),
+                ("GET", "/billing/usage", "get_workspace_overview"),
+                ("GET", "/connections", "get_workspace_overview"),
+                ("GET", "/pipelines", "get_workspace_overview"),
+            ],
+        )
 
     def test_list_connector_types_exposes_kafka_registry_and_bigquery_contracts(self) -> None:
         api = ProviderListAPI({

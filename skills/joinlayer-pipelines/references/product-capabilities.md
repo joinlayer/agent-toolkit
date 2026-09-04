@@ -74,6 +74,7 @@ All names are stable MCP tools. Tool schemas are authoritative for exact argumen
 
 | Tool | Scope | Use | Follow-up |
 |---|---|---|---|
+| `get_workspace_overview` | `workspace:read`, `usage:read`, `connections:read`, `pipelines:read` | Read identity, current capacity, and the first page plus totals of connections and pipelines in one first-session operation | Use for a broad workspace inspection; use granular tools for narrow or paginated follow-up |
 | `get_workspace_context` | `workspace:read` | Read workspace, delegated identity, user role, granted scopes, and effective start/stop approval settings | Stop on unexpected workspace; report scope gaps and follow `agent_governance` |
 | `get_workspace_capacity` | `usage:read` | Read current-period limits, usage, remaining capacity, and run blockers | Call before proposing or starting execution |
 | `list_connector_types` | `workspace:read` | Discover supported providers and source/target capabilities | Select only returned capabilities |
@@ -127,11 +128,10 @@ All names are stable MCP tools. Tool schemas are authoritative for exact argumen
 
 ### Read-Only Workspace Inspection
 
-1. Call `get_workspace_context`.
-2. Call `get_workspace_capacity`.
-3. Call `list_connections` and `list_pipelines`.
-4. Fetch individual resources only when needed to answer the question.
-5. Report identity, scopes, capacity, inventory, blockers, recommendation, and that no state changed.
+1. Call `get_workspace_overview` so the consent and response cover workspace context, capacity, connections, and pipelines together.
+2. Verify the workspace and identity before interpreting the remaining sections.
+3. Fetch granular or individual resources only when fresh data, pagination, or details are needed to answer the question.
+4. Report identity, scopes, capacity, inventory, blockers, recommendation, and that no state changed.
 
 ### Add And Discover A Connection
 

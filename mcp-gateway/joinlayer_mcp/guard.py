@@ -36,38 +36,39 @@ from .metrics import (
     REQUESTS,
 )
 
-TOOL_SCOPES = {
-    "get_workspace_context": "workspace:read",
-    "get_workspace_capacity": "usage:read",
-    "list_connector_types": "workspace:read",
-    "list_connections": "connections:read",
-    "get_connection": "connections:read",
-    "create_connection_setup": "connections:test",
-    "get_connection_setup_status": "connections:test",
-    "list_connection_setups": "connections:test",
-    "cancel_connection_setup": "connections:test",
-    "test_connection": "connections:test",
-    "discover_connection_schema": "connections:test",
-    "list_pipelines": "pipelines:read",
-    "get_pipeline": "pipelines:read",
-    "create_pipeline_draft": "pipelines:write",
-    "update_pipeline_draft": "pipelines:write",
-    "validate_pipeline": "pipelines:validate",
-    "preview_pipeline": "pipelines:validate",
-    "request_run_start_approval": "runs:execute",
-    "request_run_stop_approval": "runs:control",
-    "list_agent_approvals": "runs:read",
-    "cancel_agent_approval": "runs:read",
-    "start_pipeline": "runs:execute",
-    "list_pipeline_runs": "runs:read",
-    "get_run": "runs:read",
-    "stop_run": "runs:control",
-    "list_activity": "runs:read",
-    "diagnose_run_failure": "diagnostics:read",
-    "get_usage_report": "usage:read",
+TOOL_SCOPES: dict[str, tuple[str, ...]] = {
+    "get_workspace_overview": ("workspace:read", "usage:read", "connections:read", "pipelines:read"),
+    "get_workspace_context": ("workspace:read",),
+    "get_workspace_capacity": ("usage:read",),
+    "list_connector_types": ("workspace:read",),
+    "list_connections": ("connections:read",),
+    "get_connection": ("connections:read",),
+    "create_connection_setup": ("connections:test",),
+    "get_connection_setup_status": ("connections:test",),
+    "list_connection_setups": ("connections:test",),
+    "cancel_connection_setup": ("connections:test",),
+    "test_connection": ("connections:test",),
+    "discover_connection_schema": ("connections:test",),
+    "list_pipelines": ("pipelines:read",),
+    "get_pipeline": ("pipelines:read",),
+    "create_pipeline_draft": ("pipelines:write",),
+    "update_pipeline_draft": ("pipelines:write",),
+    "validate_pipeline": ("pipelines:validate",),
+    "preview_pipeline": ("pipelines:validate",),
+    "request_run_start_approval": ("runs:execute",),
+    "request_run_stop_approval": ("runs:control",),
+    "list_agent_approvals": ("runs:read",),
+    "cancel_agent_approval": ("runs:read",),
+    "start_pipeline": ("runs:execute",),
+    "list_pipeline_runs": ("runs:read",),
+    "get_run": ("runs:read",),
+    "stop_run": ("runs:control",),
+    "list_activity": ("runs:read",),
+    "diagnose_run_failure": ("diagnostics:read",),
+    "get_usage_report": ("usage:read",),
 }
 
-SUPPORTED_SCOPES = tuple(dict.fromkeys(TOOL_SCOPES.values()))
+SUPPORTED_SCOPES = tuple(dict.fromkeys(scope for scopes in TOOL_SCOPES.values() for scope in scopes))
 
 
 class MCPToolAuthorizationMiddleware:
@@ -90,12 +91,15 @@ class MCPToolAuthorizationMiddleware:
             return await call_next(ctx)
 
         name = ctx.params.get("name") if isinstance(ctx.params, Mapping) else None
-        required_scope = TOOL_SCOPES.get(name) if isinstance(name, str) else None
-        if required_scope is None or required_scope in current_oauth_scopes():
+        required_scopes = TOOL_SCOPES.get(name) if isinstance(name, str) else None
+        if required_scopes is None:
+            return await call_next(ctx)
+        missing_scopes = tuple(scope for scope in required_scopes if scope not in current_oauth_scopes())
+        if not missing_scopes:
             return await call_next(ctx)
 
-        message = f"Additional authorization is required for scope {required_scope}"
-        authorization_scope = _incremental_authorization_scope(current_oauth_scopes(), required_scope)
+        message = f"Additional authorization is required for scope{'s' if len(missing_scopes) != 1 else ''} {' '.join(missing_scopes)}"
+        authorization_scope = _incremental_authorization_scope(current_oauth_scopes(), required_scopes)
         challenge = _oauth_challenge(
             self.resource_metadata_url,
             authorization_scope,
@@ -134,9 +138,9 @@ def _add_tool_security_schemes(result: HandlerResult) -> HandlerResult:
             continue
         tool = dict(item)
         name = tool.get("name")
-        required_scope = TOOL_SCOPES.get(name) if isinstance(name, str) else None
-        if required_scope is not None:
-            schemes = [{"type": "oauth2", "scopes": [required_scope]}]
+        required_scopes = TOOL_SCOPES.get(name) if isinstance(name, str) else None
+        if required_scopes is not None:
+            schemes = [{"type": "oauth2", "scopes": list(required_scopes)}]
             tool["securitySchemes"] = schemes
             current_meta = tool.get("_meta")
             meta = dict(current_meta) if isinstance(current_meta, dict) else {}
@@ -359,17 +363,22 @@ class GatewayGuard:
                     return
                 bounded_receive = _body_receiver(body)
                 if path == "/mcp" and access is not None:
-                    required_scope = _required_tool_scope(body)
+                    required_scopes = _required_tool_scopes(body)
+                    missing_scopes = tuple(
+                        scope for scope in (required_scopes or ()) if scope not in access.scopes
+                    )
                     if (
-                        required_scope
-                        and required_scope not in access.scopes
+                        missing_scopes
                         and not _uses_openai_tool_level_authorization(access.client_id)
                     ):
                         granted_scopes = sorted(set(access.scopes))
-                        message = f"Additional authorization is required for scope {required_scope}"
+                        message = (
+                            f"Additional authorization is required for scope"
+                            f"{'s' if len(missing_scopes) != 1 else ''} {' '.join(missing_scopes)}"
+                        )
                         challenge = _oauth_challenge(
                             self.resource_metadata_url,
-                            _incremental_authorization_scope(access.scopes, required_scope),
+                            _incremental_authorization_scope(access.scopes, required_scopes),
                             "insufficient_scope",
                             message,
                         )
@@ -380,7 +389,7 @@ class GatewayGuard:
                             [(b"www-authenticate", challenge.encode())],
                             message=message,
                             details={
-                                "required_scopes": [required_scope],
+                                "required_scopes": list(required_scopes),
                                 "granted_scopes": granted_scopes,
                             },
                         )
@@ -457,14 +466,14 @@ def _oauth_challenge(metadata_url: str, scopes: str, error: str | None = None, e
     return "Bearer " + ", ".join(values)
 
 
-def _incremental_authorization_scope(granted_scopes: Any, required_scope: str) -> str:
+def _incremental_authorization_scope(granted_scopes: Any, required_scopes: str | tuple[str, ...]) -> str:
     """Keep an OAuth step-up cumulative instead of replacing prior access."""
     requested = {str(scope) for scope in granted_scopes}
-    requested.add(required_scope)
+    requested.update((required_scopes,) if isinstance(required_scopes, str) else required_scopes)
     return " ".join(scope for scope in SUPPORTED_SCOPES if scope in requested)
 
 
-def _required_tool_scope(body: bytes) -> str | None:
+def _required_tool_scopes(body: bytes) -> tuple[str, ...] | None:
     try:
         message = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -498,7 +507,7 @@ def _challenge_scope(headers: dict[str, str], default: str) -> str:
     if headers.get("mcp-method", "").strip().lower() == "tools/call":
         name = headers.get("mcp-name", "").strip()
         if required := TOOL_SCOPES.get(name):
-            return required
+            return " ".join(required)
     return default
 
 
