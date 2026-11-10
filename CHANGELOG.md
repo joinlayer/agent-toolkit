@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.8 — 2026-11-10
+
+- Return a resubmittable `draft` from pipeline read and write tools so an agent
+  can copy `get_pipeline.draft`, edit it, and submit that object to
+  `update_pipeline_draft`.
+- Require `field_mappings` and `transforms` on draft updates so an omitted or
+  empty list cannot wipe saved rows.
+- Report `draft_error` when a saved pipeline cannot be represented as that
+  update object.
+
 ## 0.1.7 — 2026-09-04
 
 - Keep the one-call workspace overview usable for viewer and operator roles by

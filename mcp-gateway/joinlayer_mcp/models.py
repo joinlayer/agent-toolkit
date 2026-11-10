@@ -335,6 +335,23 @@ class PipelineDraft(StrictModel):
         return value.strip() if value is not None else None
 
 
+class PipelineDraftUpdate(PipelineDraft):
+    """Update body. Lists are required so an omitted list cannot default to empty and wipe stored rows."""
+
+    transforms: list[TransformConfig] = Field(
+        description=(
+            "Saved transforms, copied from get_pipeline.draft. To drop one transform, remove that object and keep the rest. "
+            "Do not omit this list or send an empty list when the pipeline already has transforms."
+        ),
+    )
+    field_mappings: list[FieldMapping] = Field(
+        description=(
+            "Saved field mappings, copied from get_pipeline.draft. To drop one mapping, remove that object and keep the rest. "
+            "Do not omit this list or send an empty list when the pipeline already has mappings."
+        ),
+    )
+
+
 class StartRunOptions(StrictModel):
     mode: Literal["one_time", "realtime", "realtime_with_backfill", "scheduled"]
     checkpoint_mode: Literal["resume"] = "resume"
@@ -405,6 +422,7 @@ def _inline_model_schema(model: type[BaseModel]) -> dict[str, Any]:
 
 
 PipelineDraftInput = Annotated[PipelineDraft, WithJsonSchema(_inline_model_schema(PipelineDraft))]
+PipelineDraftUpdateInput = Annotated[PipelineDraftUpdate, WithJsonSchema(_inline_model_schema(PipelineDraftUpdate))]
 StartRunOptionsInput = Annotated[StartRunOptions, WithJsonSchema(_inline_model_schema(StartRunOptions))]
 ConnectionSetupDraftInput = Annotated[ConnectionSetupDraft, WithJsonSchema(_inline_model_schema(ConnectionSetupDraft))]
 ActivityQueryInput = Annotated[ActivityQuery, WithJsonSchema(_inline_model_schema(ActivityQuery))]
