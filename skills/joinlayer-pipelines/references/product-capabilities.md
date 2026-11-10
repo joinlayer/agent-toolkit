@@ -97,9 +97,9 @@ All names are stable MCP tools. Tool schemas are authoritative for exact argumen
 | Tool | Scope | Use | Follow-up |
 |---|---|---|---|
 | `list_pipelines` | `pipelines:read` | Read paginated pipeline inventory and lifecycle summary | Treat `inventory_state` as authoritative |
-| `get_pipeline` | `pipelines:read` | Read complete safe pipeline design, setup, and runtime summary | Compare durable configuration with requested outcome |
+| `get_pipeline` | `pipelines:read` | Read complete safe pipeline design, setup, and runtime summary | Copy `draft` before editing; compare durable configuration with requested outcome |
 | `create_pipeline_draft` | `pipelines:write` | Save a complete new pipeline contract | Validate; do not start from create response |
-| `update_pipeline_draft` | `pipelines:write` | Replace the complete saved draft contract | Use a new idempotency key when body/intent changes; validate again |
+| `update_pipeline_draft` | `pipelines:write` | Replace the saved draft with the copied `draft` object | Keep `field_mappings` and `transforms`; an empty list is rejected when rows exist. Use a new idempotency key when the body changes |
 | `validate_pipeline` | `pipelines:validate` | Run non-destructive setup and contract checks | Resolve blockers; explain warnings |
 | `preview_pipeline` | `pipelines:validate` | Return representative transformed/enriched target rows | Check filters, nulls, types, mappings, enrichment, and business meaning |
 
@@ -154,7 +154,7 @@ All names are stable MCP tools. Tool schemas are authoritative for exact argumen
 7. Preview representative output and explain surprises/limitations.
 8. Report the saved pipeline ID and evidence. Do not start unless requested and authorized.
 
-The draft input uses the same canonical values returned by `get_pipeline`: `target_write_strategy` is one of `connector_default`, `insert`, `upsert`, or `replace`; `throttle_policy` is `delay`; and `error_policy` is `stop` or `skip`. Optional rate limits are `max_rows_per_second`, `max_rows_per_minute`, `max_bytes_per_second`, and `max_bytes_per_minute`; use `0` on update to clear a saved limit. Do not translate `upsert` to a client-only alias.
+To change a pipeline, copy `draft` from `get_pipeline` and submit that object. This is not a sparse replacement: `field_mappings` and `transforms` are required, and an empty list is rejected when the pipeline already has those rows. Remove one object from the copied list to drop it. The draft input uses the same canonical values returned by `get_pipeline`: `target_write_strategy` is one of `connector_default`, `insert`, `upsert`, or `replace`; `throttle_policy` is `delay`; and `error_policy` is `stop` or `skip`. Optional rate limits are `max_rows_per_second`, `max_rows_per_minute`, `max_bytes_per_second`, and `max_bytes_per_minute`; use `0` on update to clear a saved limit. Do not translate `upsert` to a client-only alias.
 
 ### Start Or Resume A Pipeline
 

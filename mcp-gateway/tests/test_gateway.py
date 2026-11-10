@@ -28,7 +28,7 @@ from joinlayer_mcp.config import Settings
 from joinlayer_mcp.guard import SUPPORTED_SCOPES, TOOL_SCOPES, GatewayGuard, TokenBucketRegistry, _bounded_body, _challenge_scope, _transport_error, _uses_openai_tool_level_authorization
 from joinlayer_mcp.metrics import IN_FLIGHT
 from joinlayer_mcp.models import ConnectionSetupDraft, PipelineDraft, StartRunOptions
-from joinlayer_mcp.server import _idempotency_key, _pipeline_detail_contract, _pipeline_inventory_contract, _resource_id, _skill_archive, create_server, create_streamable_http_app
+from joinlayer_mcp.server import _idempotency_key, _pipeline_detail_contract, _pipeline_inventory_contract, _resubmittable_pipeline_draft, _resource_id, _skill_archive, create_server, create_streamable_http_app
 
 
 class FakeAPI:
@@ -2210,6 +2210,475 @@ class JoinLayerAPIStreamingTests(unittest.IsolatedAsyncioTestCase):
             await api.verify_readiness()
         finally:
             await api.close()
+
+
+def _draft_principal(org_id: str, api_token: str, scope: str = "pipelines:read pipelines:write") -> dict:
+    return {
+        "active": True,
+        "resource": "https://mcp.example.com/mcp",
+        "client_id": "https://client.example/client.json",
+        "api_token": api_token,
+        "agent_id": "agt_" + org_id,
+        "grant_id": "ogr_" + org_id,
+        "user_id": "user_" + org_id,
+        "org_id": org_id,
+        "role": "admin",
+        "scope": scope,
+        "expires_at": int(time.time()) + 300,
+    }
+
+
+class ResubmittableDraftAPI(FakeAPI):
+    """Stateful stand-in for the pipeline API contract exercised by AI-012."""
+
+    def __init__(self) -> None:
+        self.owner_bearer = "jlo_at_" + "a" * 64
+        self.other_bearer = "jlo_at_" + "b" * 64
+        self.owner = _draft_principal("org-demo", "jli_" + "o" * 64)
+        self.other = _draft_principal("org-other", "jli_" + "x" * 64, scope="pipelines:read")
+        super().__init__(self.owner)
+        self.by_bearer = {self.owner_bearer: self.owner, self.other_bearer: self.other}
+        self.org_by_token = {self.owner["api_token"]: "org-demo", self.other["api_token"]: "org-other"}
+        self.pipelines: dict[tuple[str, str], dict] = {}
+        self.applied_writes = 0
+        self.idempotency: dict[tuple[str, str], str] = {}
+
+    async def _introspect(self, token, *_args, **_kwargs):
+        principal = self.by_bearer.get(token)
+        if principal is None:
+            raise JoinLayerAPIError(401, "unauthorized", "unknown token")
+        return principal
+
+    async def _request(self, token, method, path, **kwargs):
+        org = self.org_by_token.get(token)
+        if org is None:
+            raise JoinLayerAPIError(401, "unauthorized", "unknown token")
+        body = kwargs.get("body") or {}
+        if method == "POST" and path == "/pipelines":
+            self._store(org, "pipe_orders", body, kwargs.get("idempotency_key"))
+            return self._view(org, "pipe_orders")
+        if path.startswith("/pipelines/"):
+            pipeline_id = path.removeprefix("/pipelines/")
+            if method == "GET":
+                if (org, pipeline_id) not in self.pipelines:
+                    raise JoinLayerAPIError(404, "not_found", "pipeline not found")
+                return self._view(org, pipeline_id)
+            if method == "PUT":
+                if (org, pipeline_id) not in self.pipelines:
+                    raise JoinLayerAPIError(404, "not_found", "pipeline not found")
+                self._reject_empty_lists(org, pipeline_id, body)
+                self._store(org, pipeline_id, body, kwargs.get("idempotency_key"))
+                return self._view(org, pipeline_id)
+        raise JoinLayerAPIError(404, "not_found", "route not found")
+
+    def _reject_empty_lists(self, org: str, pipeline_id: str, body: dict) -> None:
+        stored = self.pipelines[(org, pipeline_id)]["body"]
+        if body.get("field_mappings") == [] and stored.get("field_mappings") and not body.get("clear_field_mappings"):
+            raise JoinLayerAPIError(400, "field_mappings_required", "field_mappings must repeat the saved mappings")
+        if body.get("transforms") == [] and stored.get("transforms") and not body.get("clear_transforms"):
+            raise JoinLayerAPIError(400, "transforms_required", "transforms must repeat the saved transforms")
+
+    def _store(self, org: str, pipeline_id: str, body: dict, idempotency_key: str | None) -> None:
+        digest = json.dumps(body, sort_keys=True, default=str)
+        if idempotency_key:
+            slot = self.idempotency.get((org, idempotency_key))
+            if slot is not None:
+                if slot != digest:
+                    raise JoinLayerAPIError(409, "idempotency_key_reused", "this idempotency key was already used for a different request")
+                return
+            self.idempotency[(org, idempotency_key)] = digest
+        self.applied_writes += 1
+        self.pipelines[(org, pipeline_id)] = {"body": json.loads(digest)}
+
+    def _view(self, org: str, pipeline_id: str) -> dict:
+        body = dict(self.pipelines[(org, pipeline_id)]["body"])
+        mappings = []
+        for index, mapping in enumerate(body.get("field_mappings") or []):
+            item = dict(mapping)
+            item["id"] = f"map_{index}"
+            mappings.append(item)
+        body["field_mappings"] = mappings
+        return {
+            "id": pipeline_id,
+            "org_id": org,
+            "status": "DRAFT",
+            "runtime_summary": {"latest_run": {"rows_written": 12}},
+            "rows_written": 12,
+            "check_summary": {"ok": True},
+            "setup_state": {"ready_to_run": False},
+            **body,
+        }
+
+
+def _saved_pipeline_draft() -> dict:
+    return {
+        "name": "Orders copy",
+        "source_connection_id": "conn_source",
+        "target_connection_id": "conn_target",
+        "source_schema": "public",
+        "source_table": "orders",
+        "target_schema": "analytics",
+        "target_table": "orders_out",
+        "auto_sync_target_schema": True,
+        "target_schema_options": {
+            "bigquery": {
+                "partitioning": {
+                    "mode": "field",
+                    "field": "created_at",
+                    "granularity": "DAY",
+                    "require_partition_filter": False,
+                },
+                "clustering_fields": ["customer_id"],
+            }
+        },
+        "transforms": [
+            {"type": "filter", "field": "status", "op": "eq", "values": ["paid"]},
+            {
+                "type": "enrich",
+                "source_field": "customer_id",
+                "target_fields": ["customer_name"],
+                "lookup_connection_id": "conn_lookup",
+                "lookup_schema": "public",
+                "lookup_table": "customers",
+                "lookup_key_field": "id",
+                "on_miss": "leave",
+                "lookup_cache_mode": "direct",
+                "lookup_cache_ttl_seconds": 0,
+            },
+        ],
+        "run_mode": "scheduled",
+        "schedule_enabled": True,
+        "schedule_cron_expression": "0 * * * *",
+        "schedule_timezone": "UTC",
+        "target_write_strategy": "upsert",
+        "target_primary_key_field": "order_id",
+        "field_mappings": [
+            {"source_field": "id", "target_field": "order_id", "position": 0, "transforms": []},
+            {"source_field": "status", "target_field": "loyalty_tier", "position": 1, "transforms": []},
+        ],
+    }
+
+
+def _call_tool(client: TestClient, bearer: str, name: str, arguments: dict, request_id: int):
+    return client.post(
+        "/mcp",
+        headers={
+            "Authorization": "Bearer " + bearer,
+            "Accept": "application/json, text/event-stream",
+            "Origin": "https://mcp.example.com",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": name,
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments,
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {"name": "ai-012", "version": "1"},
+                },
+            },
+        },
+    )
+
+
+def _tool_result(test: unittest.TestCase, response):
+    test.assertEqual(response.status_code, 200, response.text)
+    result = response.json()["result"]
+    test.assertFalse(result.get("isError"), response.text)
+    return result["structuredContent"]
+
+
+class ResubmittablePipelineDraftTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.api = ResubmittableDraftAPI()
+        configured = settings(max_request_bytes=64 * 1024, max_response_bytes=64 * 1024)
+        server = create_server(configured, self.api)
+        self.server = server
+        self.app = GatewayGuard(
+            create_streamable_http_app(server, configured),
+            configured,
+            OAuthTokenVerifier(self.api, configured.public_url + "/mcp"),
+        )
+
+    def _create_and_get_draft(self, client: TestClient) -> dict:
+        created = _tool_result(self, _call_tool(
+            client,
+            self.api.owner_bearer,
+            "create_pipeline_draft",
+            {"pipeline": _saved_pipeline_draft(), "idempotency_key": "draft-create-001"},
+            1,
+        ))
+        self.assertIn("draft", created)
+        fetched = _tool_result(self, _call_tool(
+            client,
+            self.api.owner_bearer,
+            "get_pipeline",
+            {"pipeline_id": "pipe_orders"},
+            2,
+        ))
+        draft = fetched["draft"]
+        self.assertEqual(draft, created["draft"])
+        parsed = PipelineDraft.model_validate(draft).model_dump(mode="json", exclude_none=True)
+        self.assertEqual(parsed, draft)
+        self.assertEqual([mapping["source_field"] for mapping in draft["field_mappings"]], ["id", "status"])
+        self.assertEqual(draft["field_mappings"][1]["target_field"], "loyalty_tier")
+        self.assertNotIn("id", draft["field_mappings"][0])
+        self.assertEqual([item["type"] for item in draft["transforms"]], ["filter", "enrich"])
+        self.assertEqual(draft["transforms"][0]["values"], ["paid"])
+        self.assertEqual(draft["transforms"][1]["lookup_table"], "customers")
+        self.assertEqual(draft["schedule_cron_expression"], "0 * * * *")
+        self.assertEqual(draft["target_write_strategy"], "upsert")
+        self.assertEqual(draft["target_schema_options"]["bigquery"]["clustering_fields"], ["customer_id"])
+        self.assertEqual(fetched["runtime_summary"]["latest_run"]["rows_written"], 12)
+        self.assertNotIn("runtime_summary", draft)
+        self.assertNotIn("rows_written", draft)
+        self.assertNotIn("id", draft)
+        self.assertNotIn("check_summary", draft)
+        return draft
+
+    def test_ai_012_draft_round_trips_and_edits_one_section(self) -> None:
+        with TestClient(self.app, base_url="https://mcp.example.com") as client:
+            draft = self._create_and_get_draft(client)
+            writes_after_create = self.api.applied_writes
+            updated = _tool_result(self, _call_tool(
+                client,
+                self.api.owner_bearer,
+                "update_pipeline_draft",
+                {"pipeline_id": "pipe_orders", "pipeline": draft, "idempotency_key": "draft-retry-001"},
+                3,
+            ))
+            reread = _tool_result(self, _call_tool(
+                client,
+                self.api.owner_bearer,
+                "get_pipeline",
+                {"pipeline_id": "pipe_orders"},
+                4,
+            ))
+            self.assertEqual(reread["draft"], draft)
+            self.assertEqual(updated["draft"], draft)
+            self.assertEqual(self.api.applied_writes, writes_after_create + 1)
+
+            replayed = _tool_result(self, _call_tool(
+                client,
+                self.api.owner_bearer,
+                "update_pipeline_draft",
+                {"pipeline_id": "pipe_orders", "pipeline": draft, "idempotency_key": "draft-retry-001"},
+                5,
+            ))
+            self.assertEqual(replayed["draft"], draft)
+            self.assertEqual(self.api.applied_writes, writes_after_create + 1)
+
+            changed = json.loads(json.dumps(draft))
+            changed["name"] = "Orders renamed"
+            conflict = _call_tool(
+                client,
+                self.api.owner_bearer,
+                "update_pipeline_draft",
+                {"pipeline_id": "pipe_orders", "pipeline": changed, "idempotency_key": "draft-retry-001"},
+                6,
+            )
+            self.assertEqual(conflict.status_code, 200, conflict.text)
+            self.assertTrue(conflict.json()["result"]["isError"], conflict.text)
+            self.assertIn("idempotency_key_reused", conflict.text)
+            self.assertEqual(self.api.applied_writes, writes_after_create + 1)
+            unchanged = _tool_result(self, _call_tool(
+                client,
+                self.api.owner_bearer,
+                "get_pipeline",
+                {"pipeline_id": "pipe_orders"},
+                7,
+            ))
+            self.assertEqual(unchanged["draft"], draft)
+
+            edited = json.loads(json.dumps(draft))
+            edited["transforms"][0]["values"] = ["shipped"]
+            _tool_result(self, _call_tool(
+                client,
+                self.api.owner_bearer,
+                "update_pipeline_draft",
+                {"pipeline_id": "pipe_orders", "pipeline": edited, "idempotency_key": "draft-filter-001"},
+                8,
+            ))
+            filtered = _tool_result(self, _call_tool(
+                client,
+                self.api.owner_bearer,
+                "get_pipeline",
+                {"pipeline_id": "pipe_orders"},
+                9,
+            ))["draft"]
+            self.assertEqual(filtered["transforms"][0]["values"], ["shipped"])
+            self.assertEqual(len(filtered["field_mappings"]), 2)
+            self.assertEqual(filtered["transforms"][1]["lookup_table"], "customers")
+            self.assertEqual(filtered["schedule_cron_expression"], "0 * * * *")
+            self.assertEqual(filtered["target_write_strategy"], "upsert")
+
+            cleared = json.loads(json.dumps(filtered))
+            removed = cleared["field_mappings"].pop()
+            self.assertEqual(removed["target_field"], "loyalty_tier")
+            _tool_result(self, _call_tool(
+                client,
+                self.api.owner_bearer,
+                "update_pipeline_draft",
+                {"pipeline_id": "pipe_orders", "pipeline": cleared, "idempotency_key": "draft-clear-001"},
+                10,
+            ))
+            remaining = _tool_result(self, _call_tool(
+                client,
+                self.api.owner_bearer,
+                "get_pipeline",
+                {"pipeline_id": "pipe_orders"},
+                11,
+            ))["draft"]
+            self.assertEqual(
+                [(mapping["source_field"], mapping["target_field"]) for mapping in remaining["field_mappings"]],
+                [("id", "order_id")],
+            )
+            self.assertEqual(remaining["transforms"][1]["type"], "enrich")
+            self.assertEqual(remaining["schedule_cron_expression"], "0 * * * *")
+
+    def test_ai_012_rejects_omitted_or_empty_lists_without_writing(self) -> None:
+        with TestClient(self.app, base_url="https://mcp.example.com") as client:
+            draft = self._create_and_get_draft(client)
+            writes = self.api.applied_writes
+            self.api.request.reset_mock()
+            omitted = json.loads(json.dumps(draft))
+            omitted.pop("field_mappings")
+            omitted_response = _call_tool(
+                client,
+                self.api.owner_bearer,
+                "update_pipeline_draft",
+                {"pipeline_id": "pipe_orders", "pipeline": omitted, "idempotency_key": "draft-omit-001"},
+                3,
+            )
+            self.assertEqual(omitted_response.status_code, 200, omitted_response.text)
+            self.assertTrue(omitted_response.json()["result"]["isError"], omitted_response.text)
+            self.assertFalse(any(call.args[1] == "PUT" for call in self.api.request.await_args_list))
+            self.assertEqual(self.api.applied_writes, writes)
+
+            empty = json.loads(json.dumps(draft))
+            empty["field_mappings"] = []
+            empty_response = _call_tool(
+                client,
+                self.api.owner_bearer,
+                "update_pipeline_draft",
+                {"pipeline_id": "pipe_orders", "pipeline": empty, "idempotency_key": "draft-empty-001"},
+                4,
+            )
+            self.assertEqual(empty_response.status_code, 200, empty_response.text)
+            self.assertTrue(empty_response.json()["result"]["isError"], empty_response.text)
+            self.assertIn("field_mappings_required", empty_response.text)
+            self.assertEqual(self.api.applied_writes, writes)
+            stored = _tool_result(self, _call_tool(
+                client,
+                self.api.owner_bearer,
+                "get_pipeline",
+                {"pipeline_id": "pipe_orders"},
+                5,
+            ))["draft"]
+            self.assertEqual(len(stored["field_mappings"]), 2)
+            self.assertEqual(stored["field_mappings"][1]["target_field"], "loyalty_tier")
+
+    def test_ai_012_rejects_runtime_fields_before_the_api_write(self) -> None:
+        with TestClient(self.app, base_url="https://mcp.example.com") as client:
+            draft = self._create_and_get_draft(client)
+            self.api.request.reset_mock()
+            for extra in ({"runtime_summary": {"latest_run": None}}, {"rows_written": 12}):
+                response = _call_tool(
+                    client,
+                    self.api.owner_bearer,
+                    "update_pipeline_draft",
+                    {
+                        "pipeline_id": "pipe_orders",
+                        "pipeline": {**draft, **extra},
+                        "idempotency_key": "draft-runtime-01",
+                    },
+                    3,
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.json()["result"]["isError"], response.text)
+            self.assertFalse(any(call.args[1] == "PUT" for call in self.api.request.await_args_list))
+
+    def test_ai_012_other_workspace_cannot_read_the_draft(self) -> None:
+        with TestClient(self.app, base_url="https://mcp.example.com") as client:
+            self._create_and_get_draft(client)
+            response = _call_tool(
+                client,
+                self.api.other_bearer,
+                "get_pipeline",
+                {"pipeline_id": "pipe_orders"},
+                3,
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(response.json()["result"]["isError"], response.text)
+            self.assertIn("not_found", response.text)
+            self.assertNotIn("loyalty_tier", response.text)
+            self.assertNotIn("customer_name", response.text)
+            self.assertNotIn("orders_out", response.text)
+            self.assertNotIn('"draft"', response.text)
+
+    def test_update_tool_documents_the_clear_gesture_and_rejects_runtime_schema(self) -> None:
+        update_tool = self.server._tool_manager.get_tool("update_pipeline_draft")
+        get_tool = self.server._tool_manager.get_tool("get_pipeline")
+        assert update_tool is not None and get_tool is not None
+        self.assertIn("get_pipeline.draft", update_tool.description)
+        self.assertIn("remove that object", update_tool.description)
+        self.assertIn("empty list", update_tool.description)
+        self.assertIn("draft", get_tool.description)
+        schema = update_tool.parameters["properties"]["pipeline"]
+        self.assertFalse(schema["additionalProperties"])
+        self.assertIn("field_mappings", schema["required"])
+        self.assertIn("transforms", schema["required"])
+        self.assertNotIn("runtime_summary", schema["properties"])
+        self.assertNotIn("rows_written", schema["properties"])
+        create_schema = self.server._tool_manager.get_tool("create_pipeline_draft").parameters["properties"]["pipeline"]
+        self.assertNotIn("field_mappings", create_schema["required"])
+        root = Path(__file__).resolve().parents[2] / "skills" / "joinlayer-pipelines"
+        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+        capabilities = (root / "references" / "product-capabilities.md").read_text(encoding="utf-8")
+        self.assertIn("copy `draft`", skill)
+        self.assertIn("sparse replacement", skill)
+        self.assertIn("copy `draft`", capabilities)
+        self.assertIn("empty list", capabilities)
+
+    def test_draft_projection_folds_runtime_enrichment_aliases(self) -> None:
+        draft = _resubmittable_pipeline_draft({
+            "name": "Orders",
+            "source_connection_id": "conn_source",
+            "target_connection_id": "conn_target",
+            "target_write_strategy": "insert",
+            "field_mappings": [{"id": "map_1", "source_field": "id", "target_field": "id", "position": 0}],
+            "transforms": [{
+                "type": "enrich",
+                "key_field": "customer_id",
+                "target_field": "segment",
+                "lookup": {"1": "vip"},
+            }],
+        })
+        self.assertEqual(draft["transforms"][0]["source_field"], "customer_id")
+        self.assertEqual(draft["transforms"][0]["target_fields"], ["segment"])
+        self.assertNotIn("key_field", draft["transforms"][0])
+        self.assertNotIn("target_field", draft["transforms"][0])
+        PipelineDraft.model_validate(draft)
+
+        unrepresentable = _pipeline_detail_contract({
+            "name": "Orders",
+            "source_connection_id": "conn_source",
+            "target_connection_id": "conn_target",
+            "target_write_strategy": "insert",
+            "field_mappings": [],
+            "transforms": [{"type": "enrich", "lookup": {"1": "vip"}}],
+            "runtime_summary": {"latest_run": None},
+        }, draft=True)
+        self.assertNotIn("draft", unrepresentable)
+        self.assertEqual(unrepresentable["draft_error"]["code"], "draft_not_resubmittable")
+        self.assertEqual(unrepresentable["name"], "Orders")
+        self.assertIn("runtime_summary", unrepresentable)
 
 
 if __name__ == "__main__":

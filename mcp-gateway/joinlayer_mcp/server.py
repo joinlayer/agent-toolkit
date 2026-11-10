@@ -15,6 +15,7 @@ from mcp.server.request_state import RequestStateSecurity
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -29,6 +30,7 @@ from .models import (
     ConnectionSetupDraftInput,
     PipelineDraft,
     PipelineDraftInput,
+    PipelineDraftUpdateInput,
     StartRunOptionsInput,
 )
 
@@ -360,19 +362,19 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
 
     @mcp.tool(annotations=READ_ONLY)
     async def get_pipeline(pipeline_id: str) -> dict[str, Any]:
-        """Get the complete safe pipeline definition, mappings, transforms, checks, setup state, and runtime summary."""
+        """Get one pipeline. Copy `draft` before editing: it validates as the update input and round-trips through update_pipeline_draft. Runtime summary, checks, setup state, and IDs stay outside `draft`. If the saved pipeline cannot be represented as that object, `draft` is omitted and `draft_error` explains why."""
         result = await call("GET", f"/pipelines/{_resource_id(pipeline_id)}", tool_name="get_pipeline")
-        return _pipeline_detail_contract(result)
+        return _pipeline_detail_contract(result, draft=True)
 
     @mcp.tool(annotations=WRITE_ADDITIVE)
     async def create_pipeline_draft(pipeline: PipelineDraftInput, idempotency_key: str) -> dict[str, Any]:
         """Create a pipeline draft. Inspect connections first; validate and preview before any run."""
         result = await call("POST", "/pipelines", body=pipeline.model_dump(exclude_none=True), idempotency_key=idempotency_key, tool_name="create_pipeline_draft")
-        return _pipeline_detail_contract(result)
+        return _pipeline_detail_contract(result, draft=True)
 
     @mcp.tool(annotations=WRITE_DESTRUCTIVE)
-    async def update_pipeline_draft(pipeline_id: str, pipeline: PipelineDraftInput, idempotency_key: str) -> dict[str, Any]:
-        """Replace a pipeline draft contract with an explicitly supplied full configuration."""
+    async def update_pipeline_draft(pipeline_id: str, pipeline: PipelineDraftUpdateInput, idempotency_key: str) -> dict[str, Any]:
+        """Replace a pipeline by submitting get_pipeline.draft after editing that object. field_mappings and transforms are required. To drop one mapping or transform, remove that object from the copied list and keep the rest. Omitting either list, or sending an empty list when the pipeline already has one, is rejected and does not change the saved pipeline. Use a new idempotency key when the draft changes; reuse the same key only for an exact retry."""
         result = await call(
             "PUT",
             f"/pipelines/{_resource_id(pipeline_id)}",
@@ -380,7 +382,7 @@ def create_server(settings: Settings, api: JoinLayerAPI | None = None) -> MCPSer
             idempotency_key=idempotency_key,
             tool_name="update_pipeline_draft",
         )
-        return _pipeline_detail_contract(result)
+        return _pipeline_detail_contract(result, draft=True)
 
     @mcp.tool(annotations=VALIDATE_EXTERNAL)
     async def validate_pipeline(pipeline_id: str) -> dict[str, Any]:
@@ -605,12 +607,91 @@ def _pipeline_inventory_contract(payload: Any) -> dict[str, Any]:
     return normalized
 
 
-def _pipeline_detail_contract(payload: Any) -> dict[str, Any]:
+def _pipeline_detail_contract(payload: Any, *, draft: bool = False) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("invalid_pipeline_response: JoinLayer API returned a non-object pipeline")
     normalized = dict(payload)
     normalized.pop("status", None)
+    if draft:
+        try:
+            normalized["draft"] = _resubmittable_pipeline_draft(normalized)
+        except ValueError as exc:
+            normalized["draft_error"] = {
+                "code": "draft_not_resubmittable",
+                "message": str(exc),
+            }
     return normalized
+
+
+def _resubmittable_pipeline_draft(payload: dict[str, Any]) -> dict[str, Any]:
+    """Project a pipeline response into the PipelineDraft object agents can submit unchanged."""
+    draft_input: dict[str, Any] = {}
+    for key in PipelineDraft.model_fields:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if key in {"throttle_policy", "error_policy"} and value == "":
+            continue
+        if key == "target_schema_options" and not value:
+            continue
+        if key == "field_mappings":
+            value = _draft_field_mappings(value)
+        elif key == "transforms":
+            if value is None:
+                value = []
+            elif not isinstance(value, list):
+                raise ValueError("invalid_pipeline_response: transforms must be a list")
+            else:
+                value = [_normalize_draft_transform(item) for item in value]
+        draft_input[key] = value
+    try:
+        draft = PipelineDraft.model_validate(draft_input)
+    except ValidationError as exc:
+        raise ValueError("invalid_pipeline_response: saved pipeline is not a resubmittable draft") from exc
+    return draft.model_dump(mode="json", exclude_none=True)
+
+
+def _normalize_draft_transform(value: Any) -> Any:
+    """Fold runtime aliases into the strict draft schema without dropping unrelated keys."""
+    if not isinstance(value, dict) or value.get("type") != "enrich":
+        return value
+    item = dict(value)
+    if not item.get("source_field"):
+        alias = item.get("key_field") or item.get("field")
+        if isinstance(alias, str) and alias.strip():
+            item["source_field"] = alias.strip()
+    raw_fields = item.get("target_fields")
+    target_fields = [
+        field.strip()
+        for field in raw_fields
+        if isinstance(field, str) and field.strip()
+    ] if isinstance(raw_fields, list) else []
+    alias_field = item.get("target_field")
+    if isinstance(alias_field, str) and alias_field.strip() and alias_field.strip() not in target_fields:
+        target_fields.append(alias_field.strip())
+    if target_fields:
+        item["target_fields"] = target_fields
+    for alias in ("key_field", "field", "target_field"):
+        item.pop(alias, None)
+    return item
+
+
+def _draft_field_mappings(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("invalid_pipeline_response: field_mappings must be a list")
+    mappings: list[dict[str, Any]] = []
+    for index, mapping in enumerate(value):
+        if not isinstance(mapping, dict):
+            raise ValueError("invalid_pipeline_response: field_mappings must be objects")
+        mappings.append({
+            "source_field": mapping.get("source_field") or "",
+            "target_field": mapping.get("target_field") or "",
+            "transforms": mapping.get("transforms") or [],
+            "position": mapping.get("position", index),
+        })
+    return mappings
 
 
 def _skill_archive(directory: Path, mcp_url: str | None = None, docs_url: str | None = None) -> bytes:
